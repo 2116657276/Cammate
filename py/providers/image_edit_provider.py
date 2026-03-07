@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from app.core.config import load_runtime_env
+
 
 @dataclass
 class RetouchResult:
@@ -22,6 +24,7 @@ class DoubaoImageEditProvider:
     """
 
     def __init__(self) -> None:
+        load_runtime_env()
         self.api_url = os.getenv(
             "ARK_IMAGE_API_URL",
             "https://ark.cn-beijing.volces.com/api/v3/images/generations",

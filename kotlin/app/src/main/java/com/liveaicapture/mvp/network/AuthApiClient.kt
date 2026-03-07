@@ -50,16 +50,19 @@ class AuthApiClient(
     }
 
     suspend fun me(serverUrl: String, bearerToken: String): AuthUser = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("auth_me")
         val request = Request.Builder()
             .url("${serverUrl.trimEnd('/')}/auth/me")
             .header("Authorization", "Bearer $bearerToken")
+            .header("x-request-id", requestId)
             .get()
             .build()
 
         httpClient.newCall(request).execute().use { response ->
+            val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException(parseError(raw, response.code))
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
             }
             val obj = json.parseToJsonElement(raw).jsonObject
             parseUser(obj)
@@ -67,30 +70,36 @@ class AuthApiClient(
     }
 
     suspend fun logout(serverUrl: String, bearerToken: String) = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("auth_logout")
         val request = Request.Builder()
             .url("${serverUrl.trimEnd('/')}/auth/logout")
             .header("Authorization", "Bearer $bearerToken")
+            .header("x-request-id", requestId)
             .post("{}".toRequestBody(requestMediaType))
             .build()
 
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 val raw = response.body?.string().orEmpty()
-                throw IOException(parseError(raw, response.code))
+                val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
             }
         }
     }
 
     private fun requestAuth(url: String, payload: String): AuthResult {
+        val requestId = newRequestId("auth")
         val request = Request.Builder()
             .url(url)
+            .header("x-request-id", requestId)
             .post(payload.toRequestBody(requestMediaType))
             .build()
 
         return httpClient.newCall(request).execute().use { response ->
+            val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException(parseError(raw, response.code))
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
             }
             val obj = json.parseToJsonElement(raw).jsonObject
             val user = parseUser(obj["user"]?.jsonObject ?: JsonObject(emptyMap()))
@@ -107,16 +116,6 @@ class AuthApiClient(
         val nickname = obj["nickname"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (id <= 0 || email.isBlank()) throw IOException("用户信息不完整")
         return AuthUser(id = id, email = email, nickname = nickname.ifBlank { email.substringBefore("@") })
-    }
-
-    private fun parseError(raw: String, code: Int): String {
-        return try {
-            val obj = json.parseToJsonElement(raw).jsonObject
-            val detail = obj["detail"]?.jsonPrimitive?.contentOrNull
-            detail ?: "HTTP $code"
-        } catch (_: Exception) {
-            "HTTP $code"
-        }
     }
 }
 

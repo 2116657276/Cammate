@@ -6,10 +6,12 @@ import android.provider.MediaStore
 import android.util.Base64
 import androidx.camera.core.ImageProxy
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.liveaicapture.mvp.camera.FrameEncoder
 import com.liveaicapture.mvp.data.AnalyzeEvent
+import com.liveaicapture.mvp.data.AppSettings
 import com.liveaicapture.mvp.data.AuthUiState
 import com.liveaicapture.mvp.data.CameraUiState
 import com.liveaicapture.mvp.data.CaptureMode
@@ -20,16 +22,20 @@ import com.liveaicapture.mvp.data.RetouchUiState
 import com.liveaicapture.mvp.data.SceneType
 import com.liveaicapture.mvp.data.SessionRepository
 import com.liveaicapture.mvp.data.SettingsRepository
-import com.liveaicapture.mvp.guide.FrameSceneClassifier
-import com.liveaicapture.mvp.guide.LocalGuideEngine
+import com.liveaicapture.mvp.log.AppLog
 import com.liveaicapture.mvp.network.AnalyzeApiClient
 import com.liveaicapture.mvp.network.AuthApiClient
 import com.liveaicapture.mvp.network.FeedbackApiClient
-import com.liveaicapture.mvp.network.RetouchApiClient
+import com.liveaicapture.mvp.network.SceneApiClient
 import com.liveaicapture.mvp.tts.TtsSpeaker
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,16 +47,22 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    companion object {
+        private const val TAG = "LiveAICapture"
+        private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
+        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 12_000L
+        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 2_500L
+        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
+    }
 
     private val settingsRepository = SettingsRepository(application)
     private val sessionRepository = SessionRepository(application)
-    private val localGuideEngine = LocalGuideEngine()
-    private val frameSceneClassifier = FrameSceneClassifier()
     private val analyzeApiClient = AnalyzeApiClient()
+    private val sceneApiClient = SceneApiClient()
     private val authApiClient = AuthApiClient()
-    private val retouchApiClient = RetouchApiClient()
     private val feedbackApiClient = FeedbackApiClient()
     private val ttsSpeaker = TtsSpeaker(application)
+    private val appLogger = AppLog.get(application)
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -66,23 +78,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val requestGate = Any()
     private var analyzeInFlight = false
+    private var sceneDetectInFlight = false
     private var currentAnalyzeJob: Job? = null
     private var currentExposureCompensation = 0
 
     private val frameLock = Any()
     private var latestFrameJpeg: ByteArray? = null
     private var latestFrameRotation = 0
+    private var latestFrameCapturedAtMs = 0L
+    private var latestFrameStable = false
+    private var latestFrameStabilityScore = 0f
     private var lastSceneClassifyAt = 0L
+    private var lastStableFrameAtMs = 0L
+    private var previousLumaSignature: FloatArray? = null
+    private var stableFrameStreak = 0
+    private var lastUiStabilityUpdateAtMs = 0L
+    private var lastPublishedAspectRatio = 4f / 3f
+    private var lastPublishedStable = false
+    private var lastPublishedStabilityScore = 0f
+    private var lastSuccessfulTipText: String = ""
+    private val recentSuccessfulTips = ArrayDeque<String>()
+    private var nextAnalyzeAllowedAtMs = 0L
 
     private var bearerToken: String = ""
-
-    private val genericFallbackTips = listOf(
-        "连接异常，先用本地建议：保持水平，让主体靠近三分点。",
-        "网络不可用，先用通用构图：主体略偏一侧并留出前方空间。",
-        "云端暂不可达，先用本地建议：简化背景并突出主体轮廓。",
-        "服务连接失败，建议先锁定主光区，再微调取景位置。",
-        "已切换本地引导：先稳住机身，再调整构图层次。",
-    )
 
     init {
         observeSettings()
@@ -129,7 +147,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     user = user,
                     errorMessage = null,
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "auth.bootstrapSession.me",
+                    throwable = e,
+                    userHint = "会话校验失败，已清理本地登录态",
+                )
                 sessionRepository.clearSession()
                 bearerToken = ""
                 _authUiState.value = AuthUiState(
@@ -148,6 +171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun login(email: String, password: String) {
         viewModelScope.launch {
+            logClientInfo("auth.login", "start email=$email")
             _authUiState.update { it.copy(loading = true, errorMessage = null) }
             try {
                 val result = authApiClient.login(
@@ -164,13 +188,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     user = result.user,
                     errorMessage = null,
                 )
+                logClientInfo("auth.login", "success user=${result.user.id}")
             } catch (e: Exception) {
+                logClientError(
+                    scope = "auth.login",
+                    throwable = e,
+                    userHint = "登录失败",
+                )
                 _authUiState.update {
                     it.copy(
                         loading = false,
                         authenticated = false,
                         user = null,
-                        errorMessage = e.message ?: "登录失败",
+                        errorMessage = "登录失败，请检查账号或网络后重试",
                     )
                 }
             }
@@ -179,6 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun register(email: String, password: String, nickname: String) {
         viewModelScope.launch {
+            logClientInfo("auth.register", "start email=$email")
             _authUiState.update { it.copy(loading = true, errorMessage = null) }
             try {
                 val result = authApiClient.register(
@@ -196,13 +227,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     user = result.user,
                     errorMessage = null,
                 )
+                logClientInfo("auth.register", "success user=${result.user.id}")
             } catch (e: Exception) {
+                logClientError(
+                    scope = "auth.register",
+                    throwable = e,
+                    userHint = "注册失败",
+                )
                 _authUiState.update {
                     it.copy(
                         loading = false,
                         authenticated = false,
                         user = null,
-                        errorMessage = e.message ?: "注册失败",
+                        errorMessage = "注册失败，请检查信息后重试",
                     )
                 }
             }
@@ -211,11 +248,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         viewModelScope.launch {
+            logClientInfo("auth.logout", "start")
             val token = bearerToken
             if (token.isNotBlank()) {
                 try {
                     authApiClient.logout(_uiState.value.settings.serverUrl, token)
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    logClientError(
+                        scope = "auth.logout",
+                        throwable = e,
+                        userHint = "登出接口调用失败",
+                    )
                 }
             }
             sessionRepository.clearSession()
@@ -228,22 +271,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 errorMessage = null,
             )
             resetFlowAfterLogout()
+            logClientInfo("auth.logout", "completed")
         }
     }
 
     private fun resetFlowAfterLogout() {
         _retouchUiState.value = RetouchUiState()
         _feedbackUiState.value = FeedbackUiState()
+        lastSuccessfulTipText = ""
+        recentSuccessfulTips.clear()
         _uiState.update {
             it.copy(
                 aiEnabled = true,
                 tipText = "点击 AI分析 获取构图建议",
                 statusText = "请登录后开始拍摄",
                 overlay = it.overlay.copy(
-                    grid = "thirds",
-                    targetPointNorm = Offset(0.5f, 0.5f),
+                    grid = "none",
+                    targetPointNorm = null,
                     bboxNorm = null,
+                    subjectCenterNorm = null,
                 ),
+                moveHintText = "",
             )
         }
     }
@@ -260,58 +308,144 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onFrame(imageProxy: ImageProxy) {
         val snapshot = _uiState.value
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        val now = System.currentTimeMillis()
 
         val frameAspectRatio = computeRotatedAspectRatio(
             width = imageProxy.width,
             height = imageProxy.height,
             rotationDegrees = rotationDegrees,
         )
-        _uiState.update {
-            it.copy(overlay = it.overlay.copy(sourceAspectRatio = frameAspectRatio))
+
+        val stabilityScore = estimateFrameStability(imageProxy)
+        val isStable = updateStableStreak(stabilityScore)
+        val shouldPublishStability = (
+            now - lastUiStabilityUpdateAtMs >= UI_STABILITY_PUBLISH_INTERVAL_MS ||
+                abs(frameAspectRatio - lastPublishedAspectRatio) >= 0.01f ||
+                isStable != lastPublishedStable ||
+                abs(stabilityScore - lastPublishedStabilityScore) >= 0.08f
+            )
+        if (shouldPublishStability) {
+            _uiState.update {
+                it.copy(
+                    overlay = it.overlay.copy(sourceAspectRatio = frameAspectRatio),
+                    frameStable = isStable,
+                    stabilityScore = stabilityScore,
+                )
+            }
+            lastUiStabilityUpdateAtMs = now
+            lastPublishedAspectRatio = frameAspectRatio
+            lastPublishedStable = isStable
+            lastPublishedStabilityScore = stabilityScore
+        }
+
+        if (!snapshot.aiEnabled) {
+            imageProxy.close()
+            return
+        }
+
+        val unstableDetectInterval = snapshot.settings.intervalMs
+            .coerceIn(MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS, UNSTABLE_SCENE_DETECT_INTERVAL_MS)
+        val classifyInterval = if (isStable) {
+            STABLE_SCENE_DETECT_INTERVAL_MS
+        } else {
+            unstableDetectInterval
+        }
+        val shouldClassify = now - lastSceneClassifyAt >= classifyInterval
+        val shouldRefreshAnalyzeFrame = isStable && (now - lastStableFrameAtMs >= 1200L)
+        val shouldEncodeFrame = shouldClassify || shouldRefreshAnalyzeFrame || latestFrameJpeg == null
+        if (!shouldEncodeFrame) {
+            imageProxy.close()
+            return
         }
 
         val jpegBytes = try {
             FrameEncoder.imageProxyToJpegBytes(imageProxy)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            logClientError(
+                scope = "camera.frame.encode",
+                throwable = e,
+                userHint = "帧编码失败",
+            )
             _uiState.update { it.copy(statusText = "帧编码失败") }
             imageProxy.close()
             return
         }
         imageProxy.close()
 
-        synchronized(frameLock) {
-            latestFrameJpeg = jpegBytes
-            latestFrameRotation = rotationDegrees
+        if (shouldRefreshAnalyzeFrame || now - latestFrameCapturedAtMs > 2000L) {
+            synchronized(frameLock) {
+                latestFrameJpeg = jpegBytes
+                latestFrameRotation = rotationDegrees
+                latestFrameCapturedAtMs = now
+                latestFrameStable = isStable
+                latestFrameStabilityScore = stabilityScore
+            }
+            if (shouldRefreshAnalyzeFrame) {
+                lastStableFrameAtMs = now
+            }
         }
 
-        if (!snapshot.aiEnabled) return
-
-        val now = System.currentTimeMillis()
-        val classifyInterval = (snapshot.settings.intervalMs / 2L).coerceAtLeast(450L)
-        if (now - lastSceneClassifyAt < classifyInterval) return
+        if (!shouldClassify) return
+        if (_uiState.value.analyzingTips) return
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) return
+        if (!tryAcquireSceneDetect()) return
         lastSceneClassifyAt = now
 
-        try {
-            val classified = frameSceneClassifier.classify(jpegBytes)
-            val finalScene = resolveSceneByMode(
-                classifiedScene = classified.scene,
-                mode = snapshot.settings.captureMode,
-            )
-            val finalConfidence = if (snapshot.settings.captureMode == CaptureMode.AUTO) {
-                classified.confidence
-            } else {
-                0.95f
+        val serverUrl = snapshot.settings.serverUrl
+        val mode = snapshot.settings.captureMode
+        val sceneHint = _uiState.value.detectedScene.raw
+        val requestBytes = jpegBytes.copyOf()
+        viewModelScope.launch {
+            try {
+                val classified = sceneApiClient.detect(
+                    serverUrl = serverUrl,
+                    bearerToken = bearerToken,
+                    imageBase64 = Base64.encodeToString(requestBytes, Base64.NO_WRAP),
+                    rotationDegrees = rotationDegrees,
+                    captureMode = mode.raw,
+                    sceneHint = sceneHint,
+                )
+                applyEvent(
+                    AnalyzeEvent.Scene(
+                        scene = classified.scene,
+                        mode = mode,
+                        confidence = classified.confidence,
+                    ),
+                )
+                _uiState.update { state ->
+                    val blendedBox = blendRect(
+                        previous = state.overlay.bboxNorm,
+                        incoming = classified.bbox,
+                        alpha = 0.28f,
+                    )
+                    val blendedCenter = blendOffset(
+                        previous = state.overlay.subjectCenterNorm,
+                        incoming = classified.center,
+                        alpha = 0.20f,
+                    )
+                    val overlay = state.overlay.copy(
+                        bboxNorm = blendedBox ?: state.overlay.bboxNorm,
+                        subjectCenterNorm = blendedCenter ?: state.overlay.subjectCenterNorm,
+                    )
+                    state.copy(
+                        overlay = overlay,
+                        moveHintText = buildMoveHintText(
+                            bbox = overlay.bboxNorm,
+                            targetPoint = overlay.targetPointNorm,
+                            subjectCenter = overlay.subjectCenterNorm,
+                        ),
+                    )
+                }
+                _uiState.update { it.copy(sessionFrameCount = it.sessionFrameCount + 1) }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "camera.frame.sceneDetect",
+                    throwable = e,
+                    userHint = "场景识别失败",
+                )
+            } finally {
+                releaseSceneDetect()
             }
-            applyEvent(
-                AnalyzeEvent.Scene(
-                    scene = finalScene,
-                    mode = snapshot.settings.captureMode,
-                    confidence = finalConfidence,
-                ),
-            )
-            _uiState.update { it.copy(sessionFrameCount = it.sessionFrameCount + 1) }
-        } catch (_: Exception) {
-            _uiState.update { it.copy(statusText = "场景识别失败") }
         }
     }
 
@@ -321,11 +455,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val frameBytes = synchronized(frameLock) { latestFrameJpeg?.copyOf() }
-        val rotation = synchronized(frameLock) { latestFrameRotation }
+        val now = System.currentTimeMillis()
+        if (now < nextAnalyzeAllowedAtMs) {
+            val remain = ((nextAnalyzeAllowedAtMs - now) / 1000L).coerceAtLeast(1L)
+            _uiState.update { it.copy(statusText = "云端冷却中，请 ${remain}s 后重试") }
+            return
+        }
 
-        if (frameBytes == null) {
+        val frameSnapshot = synchronized(frameLock) {
+            val bytes = latestFrameJpeg?.copyOf() ?: return@synchronized null
+            AnalyzeFrameSnapshot(
+                bytes = bytes,
+                rotation = latestFrameRotation,
+                capturedAtMs = latestFrameCapturedAtMs,
+                stable = latestFrameStable,
+                stabilityScore = latestFrameStabilityScore,
+            )
+        }
+
+        if (frameSnapshot == null) {
             _uiState.update { it.copy(statusText = "请先稳定取景") }
+            return
+        }
+        if (!frameSnapshot.stable || System.currentTimeMillis() - frameSnapshot.capturedAtMs > 2500L) {
+            _uiState.update { it.copy(statusText = "请先稳住画面后再点 AI分析") }
             return
         }
 
@@ -334,57 +487,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        _uiState.update { it.copy(analyzingTips = true, statusText = "AI分析中...") }
+        _uiState.update {
+            it.copy(
+                analyzingTips = true,
+                tipText = "AI 正在思考，请保持画面稳定",
+                tipLevel = "info",
+                statusText = "AI分析中...",
+                overlay = it.overlay.copy(
+                    grid = "none",
+                    targetPointNorm = null,
+                ),
+                moveHintText = "",
+            )
+        }
+        logClientInfo("analyze.request", "started")
 
         val fallbackScene = _uiState.value.detectedScene
+        val previousTipText = lastSuccessfulTipText
+        val recentTipTexts = recentSuccessfulTips.toList()
         currentAnalyzeJob?.cancel()
         currentAnalyzeJob = viewModelScope.launch {
             val now = System.currentTimeMillis()
+            var finalStatus = statusByProvider(_uiState.value.settings.guideProvider, _uiState.value.aiEnabled)
             try {
                 val activeSettings = _uiState.value.settings
-                if (activeSettings.guideProvider == GuideProvider.CLOUD) {
-                    runCloudGuidanceWithFallback(
-                        settings = activeSettings,
-                        jpegBytes = frameBytes,
-                        rotationDegrees = rotation,
-                        fallbackScene = fallbackScene,
-                        nowMs = now,
-                    )
-                } else {
-                    runLocalGuidance(
-                        sceneType = fallbackScene,
-                        nowMs = now,
-                        debugPrefix = "local",
+                _uiState.update { it.copy(statusText = "云端思考中...") }
+                finalStatus = runCloudGuidanceStrict(
+                    settings = activeSettings,
+                    jpegBytes = frameSnapshot.bytes,
+                    rotationDegrees = frameSnapshot.rotation,
+                    stable = frameSnapshot.stable,
+                    stabilityScore = frameSnapshot.stabilityScore,
+                    fallbackScene = fallbackScene,
+                    previousTipText = previousTipText,
+                    recentTipTexts = recentTipTexts,
+                )
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "analyze.request",
+                    throwable = e,
+                    userHint = "分析失败",
+                )
+                nextAnalyzeAllowedAtMs = max(nextAnalyzeAllowedAtMs, now + 2500L)
+                _uiState.update {
+                    it.copy(
+                        tipText = "AI分析失败，请重试",
+                        tipLevel = "warn",
                     )
                 }
-            } catch (_: Exception) {
-                applyGenericFallback(
-                    status = "分析失败，已切换本地建议",
-                    scene = fallbackScene,
-                    nowMs = now,
-                )
+                finalStatus = "分析失败，请重试"
             } finally {
                 releaseAnalyzeRequest()
                 _uiState.update {
                     it.copy(
                         analyzingTips = false,
-                        statusText = statusByProvider(it.settings.guideProvider, it.aiEnabled),
+                        statusText = finalStatus,
                     )
                 }
+                logClientInfo("analyze.request", "finished status=$finalStatus")
             }
         }
     }
 
-    private suspend fun runCloudGuidanceWithFallback(
+    private suspend fun runCloudGuidanceStrict(
         settings: com.liveaicapture.mvp.data.AppSettings,
         jpegBytes: ByteArray,
         rotationDegrees: Int,
+        stable: Boolean,
+        stabilityScore: Float,
         fallbackScene: SceneType,
-        nowMs: Long,
-    ) {
+        previousTipText: String,
+        recentTipTexts: List<String>,
+    ): String {
         val imageBase64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        val overlaySnapshot = _uiState.value.overlay
         try {
-            var receivedEvent = false
+            var receivedUiEvent = false
             analyzeApiClient.analyze(
                 serverUrl = settings.serverUrl,
                 bearerToken = bearerToken,
@@ -392,6 +570,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 rotationDegrees = rotationDegrees,
                 lensFacing = "back",
                 exposureCompensation = currentExposureCompensation,
+                captureMode = settings.captureMode.raw,
+                sceneHint = fallbackScene.raw,
+                previousTipText = previousTipText,
+                recentTipTexts = recentTipTexts,
+                subjectCenter = overlaySnapshot.subjectCenterNorm,
+                subjectBbox = overlaySnapshot.bboxNorm,
+                frameStable = stable,
+                stabilityScore = stabilityScore,
                 onRawLine = { line ->
                     if (settings.debugEnabled) {
                         _uiState.update { state ->
@@ -403,54 +589,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 },
                 onEvent = { event ->
-                    receivedEvent = true
+                    if (event is AnalyzeEvent.Ui) {
+                        receivedUiEvent = true
+                    }
                     applyEvent(event)
                 },
             )
-            if (!receivedEvent) {
-                applyGenericFallback(
-                    status = "云端解析失败，已回退本地",
-                    scene = fallbackScene,
-                    nowMs = nowMs,
+            if (!receivedUiEvent) {
+                logClientError(
+                    scope = "analyze.cloud.no_ui",
+                    throwable = null,
+                    userHint = "云端未返回文本建议",
+                )
+                _uiState.update {
+                    it.copy(
+                        tipText = "云端未返回新建议，请重试",
+                        tipLevel = "warn",
+                    )
+                }
+                return "云端未返回新建议"
+            }
+            return "云端建议已更新"
+        } catch (e: Exception) {
+            logClientError(
+                scope = "analyze.cloud.exception",
+                throwable = e,
+                userHint = "云端连接失败",
+            )
+            _uiState.update {
+                it.copy(
+                    tipText = "云端连接失败，请检查网络后重试",
+                    tipLevel = "warn",
                 )
             }
-        } catch (_: Exception) {
-            applyGenericFallback(
-                status = "云端连接失败，已回退本地",
-                scene = fallbackScene,
-                nowMs = nowMs,
-            )
+            return "云端连接失败"
         }
-    }
-
-    private fun runLocalGuidance(sceneType: SceneType, nowMs: Long, debugPrefix: String) {
-        val localResult = localGuideEngine.analyze(
-            sceneType = sceneType,
-            nowMs = nowMs,
-            currentExposureCompensation = currentExposureCompensation,
-        )
-        if (_uiState.value.settings.debugEnabled) {
-            _uiState.update {
-                it.copy(debugRaw = "{\"source\":\"$debugPrefix\"}\n${localResult.debugLine}")
-            }
-        }
-        localResult.events.forEach(::applyEvent)
-    }
-
-    private fun applyGenericFallback(status: String, scene: SceneType, nowMs: Long) {
-        val fallbackResult = localGuideEngine.analyze(
-            sceneType = scene,
-            nowMs = nowMs,
-            currentExposureCompensation = currentExposureCompensation,
-        )
-        val tip = genericFallbackTips[((nowMs / 3000L) % genericFallbackTips.size).toInt()]
-        fallbackResult.events.forEach { event ->
-            when (event) {
-                is AnalyzeEvent.Ui -> applyEvent(AnalyzeEvent.Ui(text = tip, level = "warn"))
-                else -> applyEvent(event)
-            }
-        }
-        _uiState.update { it.copy(statusText = status) }
     }
 
     private fun applyEvent(event: AnalyzeEvent) {
@@ -466,10 +639,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is AnalyzeEvent.Strategy -> {
                 _uiState.update {
+                    val blended = blendOffset(
+                        previous = it.overlay.targetPointNorm,
+                        incoming = event.targetPoint,
+                        alpha = 0.32f,
+                    )
                     it.copy(
                         overlay = it.overlay.copy(
                             grid = event.grid,
-                            targetPointNorm = event.targetPoint,
+                            targetPointNorm = blended,
+                        ),
+                        moveHintText = buildMoveHintText(
+                            bbox = it.overlay.bboxNorm,
+                            targetPoint = blended,
+                            subjectCenter = it.overlay.subjectCenterNorm,
                         ),
                     )
                 }
@@ -477,9 +660,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is AnalyzeEvent.Target -> {
                 _uiState.update {
+                    val blendedBox = blendRect(
+                        previous = it.overlay.bboxNorm,
+                        incoming = event.bbox,
+                        alpha = 0.35f,
+                    )
+                    val blendedCenter = blendOffset(
+                        previous = it.overlay.subjectCenterNorm,
+                        incoming = event.center,
+                        alpha = 0.28f,
+                    )
                     it.copy(
                         overlay = it.overlay.copy(
-                            bboxNorm = event.bbox,
+                            bboxNorm = blendedBox,
+                            subjectCenterNorm = blendedCenter ?: it.overlay.subjectCenterNorm,
+                        ),
+                        moveHintText = buildMoveHintText(
+                            bbox = blendedBox,
+                            targetPoint = it.overlay.targetPointNorm,
+                            subjectCenter = blendedCenter ?: it.overlay.subjectCenterNorm,
                         ),
                     )
                 }
@@ -492,6 +691,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         tipLevel = event.level,
                         sessionTipCount = it.sessionTipCount + 1,
                     )
+                }
+                if (event.level == "info") {
+                    val tip = event.text.trim()
+                    lastSuccessfulTipText = tip
+                    if (tip.isNotEmpty()) {
+                        recentSuccessfulTips.remove(tip)
+                        recentSuccessfulTips.addLast(tip)
+                        while (recentSuccessfulTips.size > 4) {
+                            recentSuccessfulTips.removeFirst()
+                        }
+                    }
+                } else {
+                    val lowered = event.text.lowercase()
+                    if (lowered.contains("限流") || lowered.contains("冷却")) {
+                        nextAnalyzeAllowedAtMs = max(nextAnalyzeAllowedAtMs, System.currentTimeMillis() + 10_000L)
+                    }
                 }
                 ttsSpeaker.speak(event.text, _uiState.value.settings.voiceEnabled)
             }
@@ -516,18 +731,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun resolveSceneByMode(classifiedScene: SceneType, mode: CaptureMode): SceneType {
-        return when (mode) {
-            CaptureMode.AUTO -> classifiedScene
-            CaptureMode.PORTRAIT -> SceneType.PORTRAIT
-            CaptureMode.GENERAL -> if (classifiedScene == SceneType.PORTRAIT) SceneType.GENERAL else classifiedScene
-        }
-    }
-
     private fun tryAcquireAnalyzeRequest(): Boolean {
         synchronized(requestGate) {
             if (analyzeInFlight) return false
             analyzeInFlight = true
+            return true
+        }
+    }
+
+    private fun tryAcquireSceneDetect(): Boolean {
+        synchronized(requestGate) {
+            if (sceneDetectInFlight) return false
+            sceneDetectInFlight = true
             return true
         }
     }
@@ -538,7 +753,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun releaseSceneDetect() {
+        synchronized(requestGate) {
+            sceneDetectInFlight = false
+        }
+    }
+
     fun onPhotoCaptured(savedUri: String?) {
+        logClientInfo("photo.capture", "savedUri=${savedUri ?: "null"}")
         _uiState.update {
             it.copy(
                 photoCount = it.photoCount + 1,
@@ -562,49 +784,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun applyRetouch() {
-        val snapshot = _retouchUiState.value
-        val originalUri = snapshot.originalPhotoUri
-        if (originalUri.isNullOrBlank()) {
-            _retouchUiState.update { it.copy(errorMessage = "缺少原始照片") }
-            return
-        }
-        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
-            _retouchUiState.update { it.copy(errorMessage = "请先登录") }
-            return
-        }
-
-        viewModelScope.launch {
-            _retouchUiState.update { it.copy(applying = true, errorMessage = null) }
-            try {
-                val imageBase64 = readUriAsBase64(originalUri)
-                val result = retouchApiClient.retouch(
-                    serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
-                    imageBase64 = imageBase64,
-                    preset = snapshot.preset.raw,
-                    strength = snapshot.strength,
-                    sceneHint = snapshot.sceneHint.raw,
-                )
-                if (result.imageBase64.isBlank()) {
-                    throw IllegalStateException("云端没有返回图片")
-                }
-                _retouchUiState.update {
-                    it.copy(
-                        applying = false,
-                        previewBase64 = result.imageBase64,
-                        provider = result.provider,
-                        model = result.model,
-                        errorMessage = null,
-                    )
-                }
-            } catch (e: Exception) {
-                _retouchUiState.update {
-                    it.copy(
-                        applying = false,
-                        errorMessage = e.message ?: "修图失败，请重试",
-                    )
-                }
-            }
+        logClientInfo("retouch.apply", "skipped feature_not_ready")
+        _retouchUiState.update {
+            it.copy(
+                applying = false,
+                errorMessage = "AI修图功能暂未开放，请先使用原图继续",
+            )
         }
     }
 
@@ -629,7 +814,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val savedUri = try {
                 saveBase64ToGallery(retouched, "LiveAICapture_Retouch")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "retouch.saveToGallery",
+                    throwable = e,
+                    userHint = "修图结果保存失败，改用原图继续",
+                )
                 null
             }
             val finalUri = savedUri ?: _retouchUiState.value.originalPhotoUri
@@ -658,6 +848,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
+            logClientInfo("feedback.submit", "start rating=${current.rating} retouch=${current.isRetouched}")
             _feedbackUiState.update { it.copy(submitting = true, errorMessage = null) }
             try {
                 val feedbackId = feedbackApiClient.submit(
@@ -686,12 +877,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         errorMessage = null,
                     )
                 }
+                logClientInfo("feedback.submit", "success feedbackId=$feedbackId")
             } catch (e: Exception) {
+                logClientError(
+                    scope = "feedback.submit",
+                    throwable = e,
+                    userHint = "反馈提交失败",
+                )
                 _feedbackUiState.update {
                     it.copy(
                         submitting = false,
                         submitted = false,
-                        errorMessage = e.message ?: "反馈提交失败",
+                        errorMessage = "反馈提交失败，请稍后重试",
                     )
                 }
             }
@@ -702,15 +899,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState()
         _retouchUiState.value = RetouchUiState()
         _uiState.update { it.copy(statusText = "反馈已提交，感谢支持") }
-    }
-
-    private fun readUriAsBase64(uriString: String): String {
-        val resolver = getApplication<Application>().contentResolver
-        val uri = android.net.Uri.parse(uriString)
-        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IllegalStateException("图片读取失败")
-        if (bytes.isEmpty()) throw IllegalStateException("图片为空")
-        return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     private fun saveBase64ToGallery(base64Data: String, prefix: String): String? {
@@ -743,10 +931,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun statusByProvider(provider: GuideProvider, aiEnabled: Boolean): String {
         if (!aiEnabled) return "识别已关闭"
-        return when (provider) {
-            GuideProvider.LOCAL -> "本地识别运行中"
-            GuideProvider.CLOUD -> "云端分析可用"
+        return "云端分析可用"
+    }
+
+    private fun logClientError(scope: String, throwable: Throwable?, userHint: String) {
+        val rawMessage = throwable?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "no throwable"
+        if (throwable != null) {
+            appLogger.e(TAG, "[$scope] $userHint | $rawMessage", throwable)
+        } else {
+            appLogger.e(TAG, "[$scope] $userHint | $rawMessage")
         }
+        if (_uiState.value.settings.debugEnabled) {
+            _uiState.update { state ->
+                val merged = listOf(state.debugRaw, "ERR[$scope] $rawMessage")
+                    .filter { it.isNotBlank() }
+                    .takeLast(12)
+                    .joinToString("\n")
+                state.copy(debugRaw = merged.takeLast(4000))
+            }
+        }
+    }
+
+    private fun logClientInfo(scope: String, message: String) {
+        appLogger.i(TAG, "[$scope] $message")
     }
 
     fun updateServerUrl(value: String) {
@@ -773,6 +980,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }
     }
 
+    fun saveSettings(
+        serverUrl: String,
+        intervalMs: Long,
+        voiceEnabled: Boolean,
+        debugEnabled: Boolean,
+        guideProvider: GuideProvider,
+        captureMode: CaptureMode,
+        onSaved: (() -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            settingsRepository.updateAll(
+                AppSettings(
+                    serverUrl = serverUrl,
+                    intervalMs = intervalMs,
+                    voiceEnabled = voiceEnabled,
+                    debugEnabled = debugEnabled,
+                    guideProvider = guideProvider,
+                    captureMode = captureMode,
+                ),
+            )
+            logClientInfo("settings.save", "updated and persisted")
+            onSaved?.invoke()
+        }
+    }
+
     fun resetSettings() {
         viewModelScope.launch { settingsRepository.resetDefaults() }
     }
@@ -782,4 +1014,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ttsSpeaker.shutdown()
         super.onCleared()
     }
+
+    private fun blendOffset(previous: Offset?, incoming: Offset?, alpha: Float): Offset? {
+        if (incoming == null) return null
+        val safe = alpha.coerceIn(0.1f, 0.9f)
+        val base = previous ?: incoming
+        return Offset(
+            x = (base.x + (incoming.x - base.x) * safe).coerceIn(0f, 1f),
+            y = (base.y + (incoming.y - base.y) * safe).coerceIn(0f, 1f),
+        )
+    }
+
+    private fun blendRect(previous: Rect?, incoming: Rect?, alpha: Float): Rect? {
+        if (incoming == null) return null
+        val safe = alpha.coerceIn(0.1f, 0.9f)
+        val base = previous ?: incoming
+        return Rect(
+            left = (base.left + (incoming.left - base.left) * safe).coerceIn(0f, 1f),
+            top = (base.top + (incoming.top - base.top) * safe).coerceIn(0f, 1f),
+            right = (base.right + (incoming.right - base.right) * safe).coerceIn(0f, 1f),
+            bottom = (base.bottom + (incoming.bottom - base.bottom) * safe).coerceIn(0f, 1f),
+        )
+    }
+
+    private fun buildMoveHintText(
+        bbox: Rect?,
+        targetPoint: Offset?,
+        subjectCenter: Offset?,
+    ): String {
+        val target = targetPoint ?: return ""
+        val subject = subjectCenter ?: bbox?.let { Offset((it.left + it.right) * 0.5f, (it.top + it.bottom) * 0.5f) }
+            ?: return ""
+        val dx = (target.x - subject.x).coerceIn(-1f, 1f)
+        val dy = (target.y - subject.y).coerceIn(-1f, 1f)
+        val dist = sqrt(dx * dx + dy * dy)
+        if (dist < 0.035f) return "主体位置基本理想，可直接拍摄"
+
+        val horiz = when {
+            dx > 0.02f -> "右"
+            dx < -0.02f -> "左"
+            else -> ""
+        }
+        val vert = when {
+            dy > 0.02f -> "下"
+            dy < -0.02f -> "上"
+            else -> ""
+        }
+        val direction = (vert + horiz).ifBlank { "微调" }
+        val distancePct = (dist * 100f).toInt().coerceIn(1, 99)
+        val angleDeg = Math.toDegrees(atan2(-dy.toDouble(), dx.toDouble())).toInt()
+        return "移动建议：向${direction}约${distancePct}%（角度${angleDeg}°）"
+    }
+
+    private fun updateStableStreak(score: Float): Boolean {
+        if (score >= 0.84f) {
+            stableFrameStreak = min(20, stableFrameStreak + 1)
+        } else if (score < 0.65f) {
+            stableFrameStreak = max(0, stableFrameStreak - 2)
+        } else {
+            stableFrameStreak = max(0, stableFrameStreak - 1)
+        }
+        return stableFrameStreak >= 3
+    }
+
+    private fun estimateFrameStability(imageProxy: ImageProxy): Float {
+        val yPlane = imageProxy.planes.firstOrNull() ?: return 0f
+        val buffer = yPlane.buffer.duplicate()
+        val rowStride = yPlane.rowStride
+        val pixelStride = yPlane.pixelStride.coerceAtLeast(1)
+        val width = imageProxy.width.coerceAtLeast(1)
+        val height = imageProxy.height.coerceAtLeast(1)
+        val limit = buffer.limit()
+        val gridW = 8
+        val gridH = 8
+        val signature = FloatArray(gridW * gridH)
+
+        var idx = 0
+        for (gy in 0 until gridH) {
+            val row = ((gy + 0.5f) * height / gridH).toInt().coerceIn(0, height - 1)
+            for (gx in 0 until gridW) {
+                val col = ((gx + 0.5f) * width / gridW).toInt().coerceIn(0, width - 1)
+                val offset = row * rowStride + col * pixelStride
+                val y = if (offset in 0 until limit) {
+                    buffer.get(offset).toInt() and 0xFF
+                } else {
+                    127
+                }
+                signature[idx++] = y / 255f
+            }
+        }
+
+        val previous = previousLumaSignature
+        previousLumaSignature = signature
+        if (previous == null || previous.size != signature.size) return 0f
+
+        var diff = 0f
+        for (i in signature.indices) {
+            diff += abs(signature[i] - previous[i])
+        }
+        val meanDiff = diff / signature.size.toFloat()
+        return (1f - (meanDiff / 0.06f)).coerceIn(0f, 1f)
+    }
 }
+
+private data class AnalyzeFrameSnapshot(
+    val bytes: ByteArray,
+    val rotation: Int,
+    val capturedAtMs: Long,
+    val stable: Boolean,
+    val stabilityScore: Float,
+)

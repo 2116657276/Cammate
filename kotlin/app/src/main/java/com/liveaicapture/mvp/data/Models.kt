@@ -54,14 +54,15 @@ data class AppSettings(
     val intervalMs: Long = 1000L,
     val voiceEnabled: Boolean = true,
     val debugEnabled: Boolean = false,
-    val guideProvider: GuideProvider = GuideProvider.LOCAL,
+    val guideProvider: GuideProvider = GuideProvider.CLOUD,
     val captureMode: CaptureMode = CaptureMode.AUTO,
 )
 
 data class OverlayState(
-    val grid: String = "thirds",
+    val grid: String = "none",
     val targetPointNorm: Offset? = null,
     val bboxNorm: Rect? = null,
+    val subjectCenterNorm: Offset? = null,
     val sourceAspectRatio: Float = 4f / 3f,
 )
 
@@ -80,7 +81,10 @@ data class CameraUiState(
     val lastPhotoUri: String? = null,
     val detectedScene: SceneType = SceneType.GENERAL,
     val sceneConfidence: Float = 0f,
+    val frameStable: Boolean = false,
+    val stabilityScore: Float = 0f,
     val analyzingTips: Boolean = false,
+    val moveHintText: String = "",
 )
 
 data class AuthUser(

@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 *.pt
 app_data.db
+.env
+.env.local

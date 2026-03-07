@@ -6,6 +6,7 @@ import com.liveaicapture.mvp.data.AnalyzeEvent
 import com.liveaicapture.mvp.data.CaptureMode
 import com.liveaicapture.mvp.data.SceneType
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,6 +16,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -27,7 +29,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class AnalyzeApiClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder().build(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(16, TimeUnit.SECONDS)
+        .writeTimeout(16, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
+        .build(),
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val requestMediaType = "application/json; charset=utf-8".toMediaType()
@@ -39,10 +46,19 @@ class AnalyzeApiClient(
         rotationDegrees: Int,
         lensFacing: String,
         exposureCompensation: Int,
+        captureMode: String,
+        sceneHint: String,
+        previousTipText: String,
+        recentTipTexts: List<String> = emptyList(),
+        subjectCenter: Offset? = null,
+        subjectBbox: Rect? = null,
+        frameStable: Boolean,
+        stabilityScore: Float,
         onRawLine: (String) -> Unit,
         onEvent: (AnalyzeEvent) -> Unit,
     ) {
         return withContext(Dispatchers.IO) {
+            val requestId = newRequestId("analyze")
             val payload = buildJsonObject {
                 put("image_base64", JsonPrimitive(imageBase64))
                 put(
@@ -51,6 +67,39 @@ class AnalyzeApiClient(
                         put("rotation_degrees", JsonPrimitive(rotationDegrees))
                         put("lens_facing", JsonPrimitive(lensFacing))
                         put("exposure_compensation", JsonPrimitive(exposureCompensation))
+                        put("capture_mode", JsonPrimitive(captureMode))
+                        put("scene_hint", JsonPrimitive(sceneHint))
+                        put("previous_tip_text", JsonPrimitive(previousTipText.take(80)))
+                        put(
+                            "recent_tip_texts",
+                            buildJsonArray {
+                                recentTipTexts.takeLast(4).forEach { tip ->
+                                    add(JsonPrimitive(tip.take(80)))
+                                }
+                            },
+                        )
+                        subjectCenter?.let { center ->
+                            put(
+                                "subject_center_norm",
+                                buildJsonArray {
+                                    add(JsonPrimitive(center.x.coerceIn(0f, 1f)))
+                                    add(JsonPrimitive(center.y.coerceIn(0f, 1f)))
+                                },
+                            )
+                        }
+                        subjectBbox?.let { box ->
+                            put(
+                                "subject_bbox_norm",
+                                buildJsonArray {
+                                    add(JsonPrimitive(box.left.coerceIn(0f, 1f)))
+                                    add(JsonPrimitive(box.top.coerceIn(0f, 1f)))
+                                    add(JsonPrimitive(box.right.coerceIn(0f, 1f)))
+                                    add(JsonPrimitive(box.bottom.coerceIn(0f, 1f)))
+                                },
+                            )
+                        }
+                        put("frame_stable", JsonPrimitive(frameStable))
+                        put("stability_score", JsonPrimitive(stabilityScore.coerceIn(0f, 1f)))
                     },
                 )
             }.toString()
@@ -58,6 +107,7 @@ class AnalyzeApiClient(
             val request = Request.Builder()
                 .url("${serverUrl.trimEnd('/')}/analyze")
                 .header("Authorization", "Bearer $bearerToken")
+                .header("x-request-id", requestId)
                 .post(payload.toRequestBody(requestMediaType))
                 .build()
 
@@ -65,8 +115,10 @@ class AnalyzeApiClient(
             coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
 
             call.execute().use { response ->
+                val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
                 if (!response.isSuccessful) {
-                    throw IOException("HTTP ${response.code}")
+                    val raw = response.body?.string().orEmpty()
+                    throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
                 }
                 val body = response.body ?: throw IOException("Empty response body")
                 val source = body.source()
@@ -151,7 +203,7 @@ class AnalyzeApiClient(
                 },
             )?.let(events::add)
         }
-        if (events.none { it is AnalyzeEvent.Done }) {
+        if (events.isNotEmpty() && events.none { it is AnalyzeEvent.Done }) {
             events += AnalyzeEvent.Done
         }
         return events
@@ -168,8 +220,13 @@ class AnalyzeApiClient(
 
             "strategy" -> {
                 val point = parseNormPoint(obj["target_point_norm"])
+                val rawGrid = obj["grid"]?.jsonPrimitive?.content?.trim()?.lowercase()
+                val grid = when (rawGrid) {
+                    "thirds", "center", "none" -> rawGrid
+                    else -> "none"
+                }
                 AnalyzeEvent.Strategy(
-                    grid = obj["grid"]?.jsonPrimitive?.content ?: "thirds",
+                    grid = grid,
                     targetPoint = point,
                 )
             }

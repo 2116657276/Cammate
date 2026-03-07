@@ -15,6 +15,8 @@ class SceneResult:
     scene: str
     confidence: float
     mode: str
+    bbox_norm: list[float] | None = None
+    center_norm: list[float] | None = None
 
 
 class SceneDetector:
@@ -22,104 +24,18 @@ class SceneDetector:
         raise NotImplementedError
 
 
-class HeuristicSceneDetector(SceneDetector):
-    def detect(self, image_bytes: bytes) -> SceneResult:
-        try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception:
-            return SceneResult(scene="general", confidence=0.35, mode="auto")
-
-        w, h = image.size
-        w = max(1, w)
-        h = max(1, h)
-        step = max(1, min(w, h) // 72)
-
-        total = 0
-        luma_sum = 0.0
-        sat_sum = 0.0
-        warm = 0
-        green_blue = 0
-        center_skin = 0
-        center_total = 0
-
-        x1, x2 = int(w * 0.25), int(w * 0.75)
-        y1, y2 = int(h * 0.2), int(h * 0.8)
-
-        px = image.load()
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                r, g, b = px[x, y]
-                mx = max(r, g, b)
-                mn = min(r, g, b)
-                sat = 0.0 if mx <= 1 else float(mx - mn) / float(mx)
-                luma = 0.299 * r + 0.587 * g + 0.114 * b
-
-                total += 1
-                luma_sum += luma
-                sat_sum += sat
-
-                if r > g + 12 and r > b + 12:
-                    warm += 1
-                if g > r and b > r:
-                    green_blue += 1
-
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    center_total += 1
-                    if self._is_skin_like(r, g, b):
-                        center_skin += 1
-
-        if total == 0:
-            return SceneResult(scene="general", confidence=0.35, mode="auto")
-
-        mean_luma = luma_sum / float(total)
-        mean_sat = sat_sum / float(total)
-        warm_ratio = warm / float(total)
-        gb_ratio = green_blue / float(total)
-        center_skin_ratio = 0.0 if center_total == 0 else center_skin / float(center_total)
-
-        if mean_luma < 56.0:
-            return SceneResult(scene="night", confidence=self._conf((56.0 - mean_luma) / 48.0), mode="general")
-
-        if center_skin_ratio > 0.10 and 60.0 <= mean_luma <= 205.0:
-            score = (center_skin_ratio - 0.10) * 2.0 + (0.23 - abs(mean_sat - 0.23))
-            return SceneResult(scene="portrait", confidence=self._conf(score / 0.6), mode="portrait")
-
-        if warm_ratio > 0.30 and mean_sat > 0.25:
-            score = (warm_ratio - 0.30) + (mean_sat - 0.25)
-            return SceneResult(scene="food", confidence=self._conf(score / 0.5), mode="general")
-
-        if gb_ratio > 0.36 and mean_luma > 80.0:
-            score = (gb_ratio - 0.36) + ((mean_luma - 80.0) / 120.0)
-            return SceneResult(scene="landscape", confidence=self._conf(score / 0.6), mode="general")
-
-        return SceneResult(scene="general", confidence=0.52, mode="general")
-
-    def _is_skin_like(self, r: int, g: int, b: int) -> bool:
-        mx = max(r, g, b)
-        mn = min(r, g, b)
-        return r > 95 and g > 40 and b > 20 and (mx - mn) > 15 and abs(r - g) > 15 and r > g and r > b
-
-    def _conf(self, normalized: float) -> float:
-        v = max(0.0, min(1.0, normalized))
-        return max(0.50, min(0.95, 0.5 + v * 0.45))
-
-
-class YoloHybridSceneDetector(SceneDetector):
+class YoloSceneDetector(SceneDetector):
     """
-    Hybrid detector: YOLO11 object semantics + heuristic priors.
-    Strategy:
-    1) Prefer project custom YOLO model when provided.
-    2) Fall back to generic YOLO11 model.
-    3) If YOLO result is weak or unavailable, fall back to heuristic detector.
+    Pure YOLO scene detector.
+    No heuristic pixel rules and no local-rule fallback.
     """
 
     def __init__(self) -> None:
-        self._fallback = HeuristicSceneDetector()
         self._models: list[Any] = []
         self._ready = False
         self._predict_conf = self._env_float("SCENE_YOLO_PREDICT_CONF", 0.20, 0.01, 0.90)
         self._imgsz = self._env_int("SCENE_YOLO_IMGSZ", 640, 320, 1280)
-        self._direct_scene_min = self._env_float("SCENE_YOLO_DIRECT_MIN", 0.42, 0.20, 0.95)
+        self._direct_scene_min = self._env_float("SCENE_YOLO_DIRECT_MIN", 0.40, 0.20, 0.95)
 
         try:
             from ultralytics import YOLO  # type: ignore
@@ -143,35 +59,59 @@ class YoloHybridSceneDetector(SceneDetector):
                     self._models.append(model)
 
             self._ready = len(self._models) > 0
+            if self._ready:
+                self._warmup_models()
         except Exception:
             self._ready = False
 
     def detect(self, image_bytes: bytes) -> SceneResult:
-        heuristic = self._fallback.detect(image_bytes)
-
         if not self._ready:
-            return heuristic
+            return SceneResult(scene="general", confidence=0.20, mode="general")
 
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             labels_with_conf: list[tuple[str, float]] = []
+            best_target: tuple[float, list[float], list[float]] | None = None
             for model in self._models:
-                labels_with_conf.extend(self._predict_labels(model, image))
-
-            if not labels_with_conf:
-                return heuristic
-
-            direct_scene = self._resolve_scene_from_scene_labels(labels_with_conf, heuristic)
-            if direct_scene is not None:
-                return direct_scene
-
-            semantic_scene = self._resolve_scene_from_object_semantics(labels_with_conf, heuristic)
-            if semantic_scene is not None:
-                return semantic_scene
-
-            return heuristic
+                results = model.predict(image, verbose=False, conf=self._predict_conf, imgsz=self._imgsz)
+                if not results:
+                    continue
+                r0 = results[0]
+                names = self._normalize_names(getattr(r0, "names", None), getattr(model, "names", None))
+                labels_with_conf.extend(self._labels_from_boxes(r0, names))
+                labels_with_conf.extend(self._labels_from_probs(r0, names))
+                target = self._best_target_from_boxes(r0, names, image.width, image.height)
+                if target is not None and (best_target is None or target[0] > best_target[0]):
+                    best_target = target
         except Exception:
-            return heuristic
+            return SceneResult(scene="general", confidence=0.20, mode="general")
+
+        if not labels_with_conf:
+            return SceneResult(scene="general", confidence=0.25, mode="general", bbox_norm=None, center_norm=None)
+
+        bbox_norm = best_target[1] if best_target is not None else None
+        center_norm = best_target[2] if best_target is not None else None
+
+        direct_scene = self._resolve_scene_from_scene_labels(labels_with_conf)
+        if direct_scene is not None:
+            direct_scene.bbox_norm = bbox_norm
+            direct_scene.center_norm = center_norm
+            return direct_scene
+
+        semantic_scene = self._resolve_scene_from_object_semantics(labels_with_conf)
+        if semantic_scene is not None:
+            semantic_scene.bbox_norm = bbox_norm
+            semantic_scene.center_norm = center_norm
+            return semantic_scene
+
+        max_conf = max((conf for _, conf in labels_with_conf), default=0.25)
+        return SceneResult(
+            scene="general",
+            confidence=min(0.78, 0.30 + max_conf * 0.40),
+            mode="general",
+            bbox_norm=bbox_norm,
+            center_norm=center_norm,
+        )
 
     def _try_load_model(self, yolo_cls: Any, model_ref: str):
         try:
@@ -207,6 +147,18 @@ class YoloHybridSceneDetector(SceneDetector):
         labels.extend(self._labels_from_probs(r0, names))
         return labels
 
+    def _warmup_models(self) -> None:
+        try:
+            warmup_size = self._env_int("SCENE_YOLO_WARMUP_IMGSZ", 320, 160, 640)
+            warmup_image = Image.new("RGB", (warmup_size, warmup_size), (16, 16, 16))
+            for model in self._models:
+                try:
+                    model.predict(warmup_image, verbose=False, conf=self._predict_conf, imgsz=self._imgsz)
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     def _labels_from_boxes(self, result: Any, names: dict[int, str]) -> list[tuple[str, float]]:
         boxes = getattr(result, "boxes", None)
         if boxes is None or len(boxes) == 0:
@@ -221,6 +173,77 @@ class YoloHybridSceneDetector(SceneDetector):
             conf = float(conf_list[i]) if i < len(conf_list) else 0.0
             out.append((label, max(0.0, min(1.0, conf))))
         return out
+
+    def _best_target_from_boxes(
+        self,
+        result: Any,
+        names: dict[int, str],
+        image_width: int,
+        image_height: int,
+    ) -> tuple[float, list[float], list[float]] | None:
+        boxes = getattr(result, "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            return None
+
+        if image_width <= 0 or image_height <= 0:
+            return None
+
+        conf_list = boxes.conf.tolist() if hasattr(boxes.conf, "tolist") else list(boxes.conf)
+        cls_list = boxes.cls.tolist() if hasattr(boxes.cls, "tolist") else list(boxes.cls)
+        xyxy_list = boxes.xyxy.tolist() if hasattr(boxes.xyxy, "tolist") else list(boxes.xyxy)
+        if not xyxy_list:
+            return None
+
+        allowed_focus_labels = {
+            "person",
+            "dog",
+            "cat",
+            "bird",
+            "horse",
+            "sheep",
+            "cow",
+            "bear",
+            "zebra",
+            "giraffe",
+            "bottle",
+            "cup",
+            "bowl",
+            "cake",
+            "pizza",
+            "sandwich",
+            "apple",
+            "banana",
+            "orange",
+        }
+        best: tuple[float, list[float], list[float]] | None = None
+        for idx, xyxy in enumerate(xyxy_list):
+            if len(xyxy) < 4:
+                continue
+            label = names.get(int(cls_list[idx]), "") if idx < len(cls_list) else ""
+            conf = float(conf_list[idx]) if idx < len(conf_list) else 0.0
+            # Prefer likely subject classes, but allow fallback to highest-confidence box.
+            class_boost = 0.08 if label in allowed_focus_labels else 0.0
+            score = conf + class_boost
+
+            x1 = max(0.0, min(float(xyxy[0]), float(image_width)))
+            y1 = max(0.0, min(float(xyxy[1]), float(image_height)))
+            x2 = max(0.0, min(float(xyxy[2]), float(image_width)))
+            y2 = max(0.0, min(float(xyxy[3]), float(image_height)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            bbox_norm = [
+                round(x1 / image_width, 4),
+                round(y1 / image_height, 4),
+                round(x2 / image_width, 4),
+                round(y2 / image_height, 4),
+            ]
+            cx = round(((x1 + x2) * 0.5) / image_width, 4)
+            cy = round(((y1 + y2) * 0.5) / image_height, 4)
+            center_norm = [cx, cy]
+            if best is None or score > best[0]:
+                best = (score, bbox_norm, center_norm)
+        return best
 
     def _labels_from_probs(self, result: Any, names: dict[int, str]) -> list[tuple[str, float]]:
         probs = getattr(result, "probs", None)
@@ -249,11 +272,7 @@ class YoloHybridSceneDetector(SceneDetector):
             out.append((label, max(0.0, min(1.0, conf))))
         return out
 
-    def _resolve_scene_from_scene_labels(
-        self,
-        labels_with_conf: list[tuple[str, float]],
-        heuristic: SceneResult,
-    ) -> SceneResult | None:
+    def _resolve_scene_from_scene_labels(self, labels_with_conf: list[tuple[str, float]]) -> SceneResult | None:
         scene_score: dict[str, float] = defaultdict(float)
         scene_max: dict[str, float] = defaultdict(float)
 
@@ -261,7 +280,7 @@ class YoloHybridSceneDetector(SceneDetector):
             mapped = self._label_to_scene(label)
             if mapped is None:
                 continue
-            base = conf if conf > 0 else 0.20
+            base = conf if conf > 0 else 0.15
             scene_score[mapped] += base
             scene_max[mapped] = max(scene_max[mapped], base)
 
@@ -274,20 +293,33 @@ class YoloHybridSceneDetector(SceneDetector):
         if best_single < self._direct_scene_min and best_sum < self._direct_scene_min * 1.7:
             return None
 
-        conf = max(heuristic.confidence, min(0.95, 0.55 + best_single * 0.30 + min(best_sum, 1.0) * 0.10))
+        conf = min(0.95, 0.52 + best_single * 0.30 + min(best_sum, 1.0) * 0.12)
         mode = "portrait" if best_scene == "portrait" else "general"
         return SceneResult(scene=best_scene, confidence=conf, mode=mode)
 
-    def _resolve_scene_from_object_semantics(
-        self,
-        labels_with_conf: list[tuple[str, float]],
-        heuristic: SceneResult,
-    ) -> SceneResult | None:
+    def _resolve_scene_from_object_semantics(self, labels_with_conf: list[tuple[str, float]]) -> SceneResult | None:
         labels = [x[0].strip().lower() for x in labels_with_conf if x[0].strip()]
         if not labels:
             return None
 
-        person_count = sum(1 for x in labels if x in {"person", "man", "woman", "face", "human"})
+        person_labels = {"person", "man", "woman", "face", "human"}
+        pet_labels = {
+            "dog",
+            "cat",
+            "bird",
+            "horse",
+            "sheep",
+            "cow",
+            "bear",
+            "zebra",
+            "giraffe",
+            "hamster",
+            "rabbit",
+            "parrot",
+            "puppy",
+            "kitten",
+            "pet",
+        }
         food_labels = {
             "bowl",
             "cup",
@@ -307,22 +339,51 @@ class YoloHybridSceneDetector(SceneDetector):
             "bottle",
             "wine glass",
         }
+        landscape_labels = {
+            "mountain",
+            "beach",
+            "sea",
+            "ocean",
+            "river",
+            "forest",
+            "tree",
+            "sky",
+            "sunset",
+            "sunrise",
+            "field",
+            "park",
+            "outdoor",
+            "nature",
+            "scenery",
+            "landscape",
+        }
+        night_labels = {"night", "moon", "street light", "low light", "dark"}
+
+        person_count = sum(1 for x in labels if x in person_labels)
+        pet_count = sum(1 for x in labels if x in pet_labels)
         food_count = sum(1 for x in labels if x in food_labels)
+        landscape_count = sum(1 for x in labels if x in landscape_labels)
+        night_count = sum(1 for x in labels if x in night_labels)
         total = max(1, len(labels))
 
-        if heuristic.scene == "night":
-            return heuristic
+        if night_count >= 1 and night_count >= max(person_count, food_count):
+            return SceneResult(scene="night", confidence=0.80, mode="general")
 
-        if person_count / total >= 0.34 or person_count >= 2:
-            conf = max(0.75, heuristic.confidence)
-            return SceneResult(scene="portrait", confidence=min(conf + 0.10, 0.95), mode="portrait")
+        if person_count >= 1 and person_count >= pet_count:
+            conf = min(0.95, 0.74 + min(0.18, person_count / total))
+            return SceneResult(scene="portrait", confidence=conf, mode="portrait")
 
-        if food_count / total >= 0.22 or food_count >= 2:
-            conf = max(0.72, heuristic.confidence)
-            return SceneResult(scene="food", confidence=min(conf + 0.08, 0.92), mode="general")
+        if pet_count > 0 and person_count == 0:
+            conf = min(0.90, 0.68 + min(0.16, pet_count / total))
+            return SceneResult(scene="general", confidence=conf, mode="general")
 
-        if heuristic.scene == "landscape" and person_count == 0 and food_count == 0:
-            return SceneResult(scene="landscape", confidence=max(heuristic.confidence, 0.70), mode="general")
+        if food_count >= 1:
+            conf = min(0.92, 0.70 + min(0.18, food_count / total))
+            return SceneResult(scene="food", confidence=conf, mode="general")
+
+        if landscape_count >= 1:
+            conf = min(0.90, 0.66 + min(0.16, landscape_count / total))
+            return SceneResult(scene="landscape", confidence=conf, mode="general")
 
         return None
 
@@ -330,7 +391,7 @@ class YoloHybridSceneDetector(SceneDetector):
         text = label.strip().lower()
         compact = text.replace("_", " ").replace("-", " ")
 
-        portrait_tokens = ("portrait", "person", "people", "human", "selfie", "face", "人像", "人物")
+        portrait_tokens = ("portrait", "selfie", "face", "head", "人像", "人物")
         food_tokens = ("food", "meal", "dish", "dessert", "fruit", "drink", "美食", "食物", "餐")
         landscape_tokens = (
             "landscape",
@@ -396,12 +457,6 @@ _SCENE_DETECTOR: SceneDetector | None = None
 
 def get_scene_detector() -> SceneDetector:
     global _SCENE_DETECTOR
-    if _SCENE_DETECTOR is not None:
-        return _SCENE_DETECTOR
-
-    detector = os.getenv("SCENE_DETECTOR", "yolo_hybrid").strip().lower()
-    if detector in {"yolo", "yolo_hybrid", "hybrid", "yolo11"}:
-        _SCENE_DETECTOR = YoloHybridSceneDetector()
-    else:
-        _SCENE_DETECTOR = HeuristicSceneDetector()
+    if _SCENE_DETECTOR is None:
+        _SCENE_DETECTOR = YoloSceneDetector()
     return _SCENE_DETECTOR

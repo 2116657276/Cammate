@@ -10,11 +10,32 @@ class ClientContext(BaseModel):
     rotation_degrees: int = 0
     lens_facing: Literal["back", "front"] = "back"
     exposure_compensation: int = 0
+    capture_mode: Literal["auto", "portrait", "general"] = "auto"
+    scene_hint: str | None = Field(default=None, max_length=24)
+    previous_tip_text: str | None = Field(default=None, max_length=120)
+    recent_tip_texts: list[str] = Field(default_factory=list)
+    subject_center_norm: list[float] | None = None
+    subject_bbox_norm: list[float] | None = None
+    frame_stable: bool = False
+    stability_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class AnalyzeRequest(BaseModel):
     image_base64: str = Field(min_length=16)
     client_context: ClientContext = ClientContext()
+
+
+class SceneDetectRequest(BaseModel):
+    image_base64: str = Field(min_length=16)
+    client_context: ClientContext = ClientContext()
+
+
+class SceneDetectResponse(BaseModel):
+    scene: Literal["portrait", "general", "landscape", "food", "night"] = "general"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    mode: Literal["auto", "portrait", "general"] = "auto"
+    bbox_norm: list[float] | None = None
+    center_norm: list[float] | None = None
 
 
 class AuthRegisterRequest(BaseModel):

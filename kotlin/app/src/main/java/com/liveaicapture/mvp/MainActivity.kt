@@ -101,19 +101,37 @@ private fun LiveAICaptureApp() {
             CameraScreen(
                 viewModel = vm,
                 openSettings = { navController.navigate("settings") },
-                openRetouch = { navController.navigate("retouch") },
+                openRetouch = {
+                    navController.navigate("retouch") {
+                        popUpTo("camera") { inclusive = false }
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable("settings") {
             SettingsScreen(
                 viewModel = vm,
-                onBack = { navController.popBackStack() },
+                onBack = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate("camera") {
+                            launchSingleTop = true
+                        }
+                    }
+                },
             )
         }
         composable("retouch") {
             RetouchScreen(
                 viewModel = vm,
-                onBackToCamera = { navController.popBackStack() },
+                onBackToCamera = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate("camera") {
+                            popUpTo("camera") { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    }
+                },
                 openFeedback = { navController.navigate("feedback") },
             )
         }

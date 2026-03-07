@@ -2,6 +2,7 @@ package com.liveaicapture.mvp.ui
 
 import android.graphics.BitmapFactory
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -38,12 +40,18 @@ fun RetouchScreen(
     onBackToCamera: () -> Unit,
     openFeedback: () -> Unit,
 ) {
+    val context = LocalContext.current
     val retouchState by viewModel.retouchUiState.collectAsStateWithLifecycle()
     val feedbackState by viewModel.feedbackUiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(feedbackState.visible) {
         if (feedbackState.visible) {
             openFeedback()
+        }
+    }
+    LaunchedEffect(retouchState.errorMessage) {
+        retouchState.errorMessage?.takeIf { it.isNotBlank() }?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -143,7 +151,7 @@ fun RetouchScreen(
                     enabled = !retouchState.applying,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (retouchState.applying) "修图处理中..." else "AI修图")
+                    Text(if (retouchState.applying) "处理中..." else "AI修图（暂未开放）")
                 }
 
                 Button(

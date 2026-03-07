@@ -7,7 +7,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -32,6 +31,7 @@ class FeedbackApiClient(
         isRetouch: Boolean,
         sessionMeta: JsonElement,
     ): Int = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("feedback")
         val payload = buildJsonObject {
             put("rating", JsonPrimitive(rating))
             put("scene", JsonPrimitive(scene))
@@ -44,25 +44,18 @@ class FeedbackApiClient(
         val request = Request.Builder()
             .url("${serverUrl.trimEnd('/')}/feedback")
             .header("Authorization", "Bearer $bearerToken")
+            .header("x-request-id", requestId)
             .post(payload.toRequestBody(requestMediaType))
             .build()
 
         httpClient.newCall(request).execute().use { response ->
+            val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException(parseError(raw, response.code))
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
             }
             val obj = json.parseToJsonElement(raw).jsonObject
             obj["feedback_id"]?.jsonPrimitive?.intOrNull ?: 0
-        }
-    }
-
-    private fun parseError(raw: String, code: Int): String {
-        return try {
-            val obj = json.parseToJsonElement(raw).jsonObject
-            obj["detail"]?.jsonPrimitive?.contentOrNull ?: "HTTP $code"
-        } catch (_: Exception) {
-            "HTTP $code"
         }
     }
 }

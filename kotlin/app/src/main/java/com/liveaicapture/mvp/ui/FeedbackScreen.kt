@@ -1,6 +1,7 @@
 package com.liveaicapture.mvp.ui
 
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,12 +35,18 @@ fun FeedbackScreen(
     viewModel: MainViewModel,
     finishToCamera: () -> Unit,
 ) {
+    val context = LocalContext.current
     val state by viewModel.feedbackUiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(state.submitted) {
         if (state.submitted) {
             viewModel.finishFeedbackFlow()
             finishToCamera()
+        }
+    }
+    LaunchedEffect(state.errorMessage) {
+        state.errorMessage?.takeIf { it.isNotBlank() }?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
         }
     }
 

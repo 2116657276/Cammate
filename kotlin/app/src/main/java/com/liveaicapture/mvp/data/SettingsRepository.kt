@@ -30,7 +30,7 @@ class SettingsRepository(private val context: Context) {
             intervalMs = (pref[Keys.intervalMs] ?: 1000L).coerceIn(300L, 5000L),
             voiceEnabled = pref[Keys.voiceEnabled] ?: true,
             debugEnabled = pref[Keys.debugEnabled] ?: false,
-            guideProvider = GuideProvider.fromRaw(pref[Keys.guideProvider] ?: GuideProvider.LOCAL.raw),
+            guideProvider = GuideProvider.fromRaw(pref[Keys.guideProvider] ?: GuideProvider.CLOUD.raw),
             captureMode = CaptureMode.fromRaw(pref[Keys.captureMode] ?: CaptureMode.AUTO.raw),
         )
     }
@@ -59,13 +59,24 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.captureMode] = mode.raw }
     }
 
+    suspend fun updateAll(settings: AppSettings) {
+        context.dataStore.edit { pref ->
+            pref[Keys.serverUrl] = settings.serverUrl.trim()
+            pref[Keys.intervalMs] = settings.intervalMs.coerceIn(300L, 5000L)
+            pref[Keys.voiceEnabled] = settings.voiceEnabled
+            pref[Keys.debugEnabled] = settings.debugEnabled
+            pref[Keys.guideProvider] = settings.guideProvider.raw
+            pref[Keys.captureMode] = settings.captureMode.raw
+        }
+    }
+
     suspend fun resetDefaults() {
         context.dataStore.edit { pref ->
             pref[Keys.serverUrl] = "http://10.0.2.2:8000"
             pref[Keys.intervalMs] = 1000L
             pref[Keys.voiceEnabled] = true
             pref[Keys.debugEnabled] = false
-            pref[Keys.guideProvider] = GuideProvider.LOCAL.raw
+            pref[Keys.guideProvider] = GuideProvider.CLOUD.raw
             pref[Keys.captureMode] = CaptureMode.AUTO.raw
         }
     }

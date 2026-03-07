@@ -28,6 +28,7 @@ class RetouchApiClient(
         strength: Float,
         sceneHint: String,
     ): RetouchResult = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("retouch")
         val payload = buildJsonObject {
             put("image_base64", JsonPrimitive(imageBase64))
             put("preset", JsonPrimitive(preset))
@@ -38,13 +39,15 @@ class RetouchApiClient(
         val request = Request.Builder()
             .url("${serverUrl.trimEnd('/')}/retouch")
             .header("Authorization", "Bearer $bearerToken")
+            .header("x-request-id", requestId)
             .post(payload.toRequestBody(requestMediaType))
             .build()
 
         httpClient.newCall(request).execute().use { response ->
+            val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException(parseError(raw, response.code))
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
             }
             val obj = json.parseToJsonElement(raw).jsonObject
             RetouchResult(
@@ -52,15 +55,6 @@ class RetouchApiClient(
                 provider = obj["provider"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 model = obj["model"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
-        }
-    }
-
-    private fun parseError(raw: String, code: Int): String {
-        return try {
-            val obj = json.parseToJsonElement(raw).jsonObject
-            obj["detail"]?.jsonPrimitive?.contentOrNull ?: "HTTP $code"
-        } catch (_: Exception) {
-            "HTTP $code"
         }
     }
 }

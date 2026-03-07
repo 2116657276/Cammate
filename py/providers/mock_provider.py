@@ -43,10 +43,20 @@ class MockProvider(VisionProvider):
     ) -> list[dict[str, Any]]:
         exposure = int(client_context.get("exposure_compensation", 0))
         scene = detected_scene if detected_scene in self._tips else "general"
+        previous_tip = str(client_context.get("previous_tip_text") or "").strip()
+        frame_stable = bool(client_context.get("frame_stable", False))
 
         tip_pool = self._tips[scene]
         seed = len(image_base64) + exposure * 7 + len(scene) * 13
         tip = tip_pool[seed % len(tip_pool)]
+        if previous_tip:
+            for offset in range(len(tip_pool)):
+                candidate = tip_pool[(seed + offset) % len(tip_pool)]
+                if candidate != previous_tip:
+                    tip = candidate
+                    break
+        if not frame_stable:
+            tip = "先稳住画面 1 秒，再点击 AI分析 获取更准建议。"
 
         if scene == "portrait":
             recommend_ev = 0 if exposure <= 1 else -1

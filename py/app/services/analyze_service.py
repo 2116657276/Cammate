@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+import os
+import time
+import uuid
 from typing import Any
 
 from fastapi import HTTPException
@@ -10,6 +14,8 @@ from fastapi import HTTPException
 from app.models.schemas import AnalyzeRequest
 from providers.factory import get_provider
 from scene_detector import get_scene_detector
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def validate_image_base64(image_base64: str) -> bytes:
@@ -43,7 +49,7 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
             _clamp01(target[1] if len(target) > 1 else 0.5, 0.5),
         ]
         if event.get("grid") not in {"thirds", "center", "none"}:
-            event["grid"] = "thirds"
+            event["grid"] = "none"
     elif etype == "target":
         bbox = event.get("bbox_norm", [0.2, 0.2, 0.8, 0.8])
         if len(bbox) != 4:
@@ -72,10 +78,32 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 async def event_stream(req: AnalyzeRequest):
+    start_ts = time.perf_counter()
+    request_id = uuid.uuid4().hex[:8]
     raw_bytes = validate_image_base64(req.image_base64)
     detector = get_scene_detector()
     provider = get_provider()
-    scene_result = detector.detect(raw_bytes)
+    provider_timeout_sec = _read_timeout_sec()
+    total_budget_sec = _read_total_budget_sec()
+    client_ctx = _normalize_client_context(req.client_context.model_dump())
+    scene_hint = str(client_ctx.get("scene_hint") or "").strip().lower()
+    if scene_hint in {"portrait", "general", "landscape", "food", "night"}:
+        mode = "portrait" if scene_hint == "portrait" else "general"
+        scene_result = _SceneHintResult(scene=scene_hint, confidence=0.70, mode=mode)
+    else:
+        scene_result = detector.detect(raw_bytes)
+
+    logger.info(
+        "analyze.start id=%s scene=%s mode=%s stable=%s score=%.2f recent=%d has_prev=%s has_subject=%s",
+        request_id,
+        scene_result.scene,
+        scene_result.mode,
+        bool(client_ctx.get("frame_stable", False)),
+        float(client_ctx.get("stability_score", 0.0) or 0.0),
+        len(client_ctx.get("recent_tip_texts", [])),
+        bool(str(client_ctx.get("previous_tip_text") or "").strip()),
+        bool(client_ctx.get("subject_center_norm")),
+    )
 
     scene_event = {
         "type": "scene",
@@ -86,11 +114,56 @@ async def event_stream(req: AnalyzeRequest):
     yield json.dumps(normalize_event(scene_event), ensure_ascii=False) + "\n"
     await asyncio.sleep(0)
 
-    events = await provider.analyze(
-        image_base64=req.image_base64,
-        detected_scene=scene_result.scene,
-        client_context=req.client_context.model_dump(),
-    )
+    elapsed = time.perf_counter() - start_ts
+    remaining_budget = max(0.8, total_budget_sec - elapsed)
+    hard_timeout = min(provider_timeout_sec, remaining_budget)
+
+    try:
+        events = await asyncio.wait_for(
+            provider.analyze(
+                image_base64=req.image_base64,
+                detected_scene=scene_result.scene,
+                client_context=client_ctx,
+            ),
+            timeout=hard_timeout,
+        )
+        logger.info(
+            "analyze.provider_ok id=%s elapsed_ms=%d timeout=%.2f events=%d",
+            request_id,
+            int((time.perf_counter() - start_ts) * 1000),
+            hard_timeout,
+            len(events),
+        )
+    except Exception as exc:
+        logger.warning(
+            "analyze.provider_failed id=%s elapsed_ms=%d timeout=%.2f reason=%r",
+            request_id,
+            int((time.perf_counter() - start_ts) * 1000),
+            hard_timeout,
+            exc,
+        )
+        reason = str(exc)
+        if "ARK_API_KEY missing" in reason:
+            text = "云端未配置 ARK_API_KEY，请联系管理员配置后重试"
+        elif "401" in reason or "403" in reason:
+            text = "云端鉴权失败，请检查 API Key 配置"
+        elif "rate limited cooldown active" in reason:
+            text = "云端限流冷却中，请稍后再试"
+        elif "429" in reason:
+            text = "云端限流，请稍后重试"
+        elif "cloud repeated tip" in reason:
+            text = "云端建议重复，请重试"
+        else:
+            text = "云端分析失败，请重试"
+        events = [
+            {
+                "type": "ui",
+                "text": text,
+                "level": "warn",
+            },
+            {"type": "done"},
+        ]
+
     has_done = False
     for event in events:
         normalized = normalize_event(event)
@@ -102,6 +175,13 @@ async def event_stream(req: AnalyzeRequest):
     if not has_done:
         yield json.dumps({"type": "done"}, ensure_ascii=False) + "\n"
 
+    logger.info(
+        "analyze.finish id=%s elapsed_ms=%d has_done=%s",
+        request_id,
+        int((time.perf_counter() - start_ts) * 1000),
+        has_done,
+    )
+
 
 def _clamp01(value: Any, default: float) -> float:
     try:
@@ -109,3 +189,65 @@ def _clamp01(value: Any, default: float) -> float:
     except Exception:
         return default
     return max(0.0, min(1.0, v))
+
+
+def _read_timeout_sec() -> float:
+    raw = os.getenv("ANALYZE_PROVIDER_TIMEOUT_SEC", "13.2").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 13.2
+    return max(3.0, min(15.0, value))
+
+
+def _read_total_budget_sec() -> float:
+    raw = os.getenv("ANALYZE_TOTAL_BUDGET_SEC", "13.8").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 13.8
+    return max(4.0, min(15.0, value))
+
+
+class _SceneHintResult:
+    def __init__(self, scene: str, confidence: float, mode: str) -> None:
+        self.scene = scene
+        self.confidence = confidence
+        self.mode = mode
+
+
+def _normalize_client_context(client_ctx: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(client_ctx)
+    recent = normalized.get("recent_tip_texts")
+    if not isinstance(recent, list):
+        normalized["recent_tip_texts"] = []
+    else:
+        cleaned: list[str] = []
+        for item in recent:
+            text = str(item or "").strip()
+            if text:
+                cleaned.append(text[:80])
+        normalized["recent_tip_texts"] = cleaned[-4:]
+
+    prev_tip = str(normalized.get("previous_tip_text") or "").strip()
+    normalized["previous_tip_text"] = prev_tip[:80] if prev_tip else ""
+
+    subject_center = normalized.get("subject_center_norm")
+    if isinstance(subject_center, list) and len(subject_center) >= 2:
+        normalized["subject_center_norm"] = [
+            _clamp01(subject_center[0], 0.5),
+            _clamp01(subject_center[1], 0.5),
+        ]
+    else:
+        normalized["subject_center_norm"] = None
+
+    subject_bbox = normalized.get("subject_bbox_norm")
+    if isinstance(subject_bbox, list) and len(subject_bbox) >= 4:
+        x1 = _clamp01(subject_bbox[0], 0.2)
+        y1 = _clamp01(subject_bbox[1], 0.2)
+        x2 = _clamp01(subject_bbox[2], 0.8)
+        y2 = _clamp01(subject_bbox[3], 0.8)
+        normalized["subject_bbox_norm"] = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+    else:
+        normalized["subject_bbox_norm"] = None
+    return normalized

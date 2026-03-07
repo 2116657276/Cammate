@@ -1,5 +1,6 @@
 package com.liveaicapture.mvp.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -21,6 +23,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -30,6 +33,7 @@ fun RegisterScreen(
     viewModel: MainViewModel,
     onBackToLogin: () -> Unit,
 ) {
+    val context = LocalContext.current
     val authState by viewModel.authUiState.collectAsStateWithLifecycle()
 
     var nickname by rememberSaveable { mutableStateOf("") }
@@ -39,6 +43,12 @@ fun RegisterScreen(
 
     val passwordMatched = password == confirmPassword
     val canSubmit = email.isNotBlank() && password.length >= 6 && passwordMatched && !authState.loading
+
+    LaunchedEffect(authState.errorMessage) {
+        authState.errorMessage?.takeIf { it.isNotBlank() }?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Column(
         modifier = Modifier
