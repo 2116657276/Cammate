@@ -48,7 +48,7 @@ import kotlinx.serialization.json.buildJsonObject
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
-        private const val TAG = "LiveAICapture"
+        private const val TAG = "CamMate"
         private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
         private const val STABLE_SCENE_DETECT_INTERVAL_MS = 12_000L
         private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 2_500L
@@ -99,6 +99,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastSuccessfulTipText: String = ""
     private val recentSuccessfulTips = ArrayDeque<String>()
     private var nextAnalyzeAllowedAtMs = 0L
+    private var sceneAutoSwitchUsed = false
+    private var sceneAutoSwitchLockedByManual = false
 
     private var bearerToken: String = ""
 
@@ -200,7 +202,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         loading = false,
                         authenticated = false,
                         user = null,
-                        errorMessage = "登录失败，请检查账号或网络后重试",
+                        errorMessage = userFriendlyAuthError(e, action = "login"),
                     )
                 }
             }
@@ -239,7 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         loading = false,
                         authenticated = false,
                         user = null,
-                        errorMessage = "注册失败，请检查信息后重试",
+                        errorMessage = userFriendlyAuthError(e, action = "register"),
                     )
                 }
             }
@@ -280,6 +282,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState()
         lastSuccessfulTipText = ""
         recentSuccessfulTips.clear()
+        sceneAutoSwitchUsed = false
+        sceneAutoSwitchLockedByManual = false
         _uiState.update {
             it.copy(
                 aiEnabled = true,
@@ -303,6 +307,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 statusText = statusByProvider(it.settings.guideProvider, enabled),
             )
         }
+    }
+
+    fun onCameraSessionEntered() {
+        sceneAutoSwitchUsed = false
+        sceneAutoSwitchLockedByManual = false
+        lastSceneClassifyAt = 0L
+    }
+
+    fun onCameraSessionExited() {
+        // Session-scoped auto-switch flags are reset on next enter.
     }
 
     fun onFrame(imageProxy: ImageProxy) {
@@ -408,7 +422,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 applyEvent(
                     AnalyzeEvent.Scene(
                         scene = classified.scene,
-                        mode = mode,
+                        mode = CaptureMode.fromRaw(classified.mode),
                         confidence = classified.confidence,
                     ),
                 )
@@ -630,10 +644,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         when (event) {
             is AnalyzeEvent.Scene -> {
                 _uiState.update {
-                    it.copy(
-                        detectedScene = event.scene,
-                        sceneConfidence = event.confidence.coerceIn(0f, 1f),
-                    )
+                    val incomingConfidence = event.confidence.coerceIn(0f, 1f)
+                    val currentScene = it.detectedScene
+                    val currentConfidence = it.sceneConfidence.coerceIn(0f, 1f)
+                    val autoModeEnabled = it.settings.captureMode == CaptureMode.AUTO
+                    val confidenceAllowsSwitch = (
+                        incomingConfidence >= 0.82f ||
+                            (currentConfidence <= 0.35f && incomingConfidence >= 0.62f)
+                        )
+                    val canAutoSwitchNow = (
+                        autoModeEnabled &&
+                            !sceneAutoSwitchLockedByManual &&
+                            !sceneAutoSwitchUsed
+                        )
+                    val shouldSwitchScene = (
+                        event.scene != currentScene &&
+                            canAutoSwitchNow &&
+                            confidenceAllowsSwitch
+                        )
+
+                    if (event.scene == currentScene) {
+                        it.copy(
+                            sceneConfidence = incomingConfidence,
+                        )
+                    } else if (shouldSwitchScene) {
+                        sceneAutoSwitchUsed = true
+                        it.copy(
+                            detectedScene = event.scene,
+                            sceneConfidence = incomingConfidence,
+                        )
+                    } else {
+                        it.copy(
+                            sceneConfidence = max(currentConfidence * 0.90f, incomingConfidence * 0.72f),
+                        )
+                    }
                 }
             }
 
@@ -813,7 +857,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val savedUri = try {
-                saveBase64ToGallery(retouched, "LiveAICapture_Retouch")
+                saveBase64ToGallery(retouched, "CamMate_Retouch")
             } catch (e: Exception) {
                 logClientError(
                     scope = "retouch.saveToGallery",
@@ -911,7 +955,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "${prefix}_$fileName")
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/LiveAICapture")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CamMate")
         }
 
         val resolver = app.contentResolver
@@ -932,6 +976,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun statusByProvider(provider: GuideProvider, aiEnabled: Boolean): String {
         if (!aiEnabled) return "识别已关闭"
         return "云端分析可用"
+    }
+
+    private fun userFriendlyAuthError(throwable: Throwable?, action: String): String {
+        val raw = throwable?.message.orEmpty().lowercase()
+        return when {
+            "email already registered" in raw -> "该邮箱已注册，请直接登录"
+            "invalid email" in raw -> "邮箱格式不正确，请检查 @ 和域名后缀"
+            "string_too_short" in raw && "\"password\"" in raw -> "密码至少 6 位"
+            "string_too_long" in raw && "\"nickname\"" in raw -> "昵称最多 32 个字符"
+            "invalid credentials" in raw -> "账号或密码错误"
+            action == "login" -> "登录失败，请检查账号或网络后重试"
+            else -> "注册失败，请检查信息后重试"
+        }
     }
 
     private fun logClientError(scope: String, throwable: Throwable?, userHint: String) {
@@ -977,6 +1034,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateCaptureMode(mode: CaptureMode) {
+        sceneAutoSwitchLockedByManual = true
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }
     }
 

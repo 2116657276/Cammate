@@ -5,7 +5,7 @@ import androidx.compose.ui.geometry.Rect
 
 enum class GuideProvider(val raw: String, val label: String) {
     LOCAL("local", "本地引导"),
-    CLOUD("cloud", "云端API");
+    CLOUD("cloud", "云端 AI");
 
     companion object {
         fun fromRaw(raw: String): GuideProvider {
@@ -18,7 +18,8 @@ enum class GuideProvider(val raw: String, val label: String) {
 enum class CaptureMode(val raw: String, val label: String) {
     AUTO("auto", "自动"),
     PORTRAIT("portrait", "人像"),
-    GENERAL("general", "通用");
+    GENERAL("general", "通用"),
+    FOOD("food", "美食");
 
     companion object {
         fun fromRaw(raw: String): CaptureMode = entries.firstOrNull { it.raw == raw } ?: AUTO
@@ -33,7 +34,10 @@ enum class SceneType(val raw: String, val label: String) {
     NIGHT("night", "夜景");
 
     companion object {
-        fun fromRaw(raw: String): SceneType = entries.firstOrNull { it.raw == raw } ?: GENERAL
+        fun fromRaw(raw: String): SceneType {
+            if (raw == "landscape") return GENERAL
+            return entries.firstOrNull { it.raw == raw } ?: GENERAL
+        }
     }
 }
 
@@ -70,7 +74,7 @@ data class CameraUiState(
     val aiEnabled: Boolean = true,
     val settings: AppSettings = AppSettings(),
     val overlay: OverlayState = OverlayState(),
-    val tipText: String = "点击 AI分析 获取构图建议",
+    val tipText: String = "点击 AI 分析获取构图建议",
     val tipLevel: String = "info",
     val exposureSuggestion: Int? = null,
     val debugRaw: String = "",

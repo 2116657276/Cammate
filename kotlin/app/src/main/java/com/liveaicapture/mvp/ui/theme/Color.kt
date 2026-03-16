@@ -2,10 +2,12 @@ package com.liveaicapture.mvp.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Ocean900 = Color(0xFF07101E)
-val Ocean700 = Color(0xFF12314A)
-val Ocean500 = Color(0xFF1E5777)
-val Sky300 = Color(0xFF7CE3FF)
-val Ice100 = Color(0xFFEAF8FF)
-val Coral300 = Color(0xFFFFA084)
-val Slate100 = Color(0xFFD2E8FA)
+val CamBg = Color(0xFFF7F8FA)
+val CamSurface = Color(0xFFFFFFFF)
+val CamSurfaceSoft = Color(0xFFF2F4F7)
+val CamPrimary = Color(0xFF2A5BD7)
+val CamPrimarySoft = Color(0xFFE8EEFF)
+val CamText = Color(0xFF1E293B)
+val CamTextSecondary = Color(0xFF64748B)
+val CamBorder = Color(0xFFD9E0EA)
+val CamDanger = Color(0xFFB42318)

@@ -1,4 +1,4 @@
-package com.liveaicapture.mvp.ui
+﻿package com.liveaicapture.mvp.ui
 
 import android.Manifest
 import android.content.ContentValues
@@ -23,33 +23,41 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -62,7 +70,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +81,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Cameraswitch
+import androidx.compose.material.icons.outlined.Exposure
+import androidx.compose.material.icons.outlined.FlashOn
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.ZoomIn
 import com.liveaicapture.mvp.data.CaptureMode
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -85,6 +100,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CameraScreen(
     viewModel: MainViewModel,
@@ -118,12 +134,23 @@ fun CameraScreen(
 
     val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var activeCamera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
     var lens by rememberSaveable { mutableStateOf(CameraLens.BACK) }
     var flash by rememberSaveable { mutableStateOf(FlashMode.OFF) }
     var timerSec by rememberSaveable { mutableIntStateOf(0) }
+    var zoomRatio by rememberSaveable { mutableFloatStateOf(1f) }
+    var minZoomRatio by rememberSaveable { mutableFloatStateOf(1f) }
+    var maxZoomRatio by rememberSaveable { mutableFloatStateOf(6f) }
+    var exposureIndex by rememberSaveable { mutableIntStateOf(0) }
+    var minExposureIndex by rememberSaveable { mutableIntStateOf(0) }
+    var maxExposureIndex by rememberSaveable { mutableIntStateOf(0) }
+    var exposureStepEv by rememberSaveable { mutableFloatStateOf(1f) }
+    var torchEnabled by rememberSaveable { mutableStateOf(false) }
+    var hasFlashUnit by rememberSaveable { mutableStateOf(false) }
+    var activeSheet by rememberSaveable { mutableStateOf<CameraSettingSheet?>(null) }
+    var aiPanelDetailed by rememberSaveable { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
     var captureJob by remember { mutableStateOf<Job?>(null) }
-    var showAdvancedControls by rememberSaveable { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -146,18 +173,31 @@ fun CameraScreen(
         }
     }
 
+    LaunchedEffect(activeCamera, zoomRatio, minZoomRatio, maxZoomRatio) {
+        val camera = activeCamera ?: return@LaunchedEffect
+        val safeZoom = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+        if (safeZoom != zoomRatio) zoomRatio = safeZoom
+        camera.cameraControl.setZoomRatio(safeZoom)
+    }
+
+    LaunchedEffect(activeCamera, exposureIndex, minExposureIndex, maxExposureIndex) {
+        val camera = activeCamera ?: return@LaunchedEffect
+        if (maxExposureIndex <= minExposureIndex) return@LaunchedEffect
+        val safeIndex = exposureIndex.coerceIn(minExposureIndex, maxExposureIndex)
+        if (safeIndex != exposureIndex) exposureIndex = safeIndex
+        camera.cameraControl.setExposureCompensationIndex(safeIndex)
+    }
+
+    LaunchedEffect(activeCamera, torchEnabled, hasFlashUnit, lens) {
+        val camera = activeCamera ?: return@LaunchedEffect
+        val enabled = lens == CameraLens.BACK && hasFlashUnit && torchEnabled
+        camera.cameraControl.enableTorch(enabled)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF061327),
-                        Color(0xFF0A1B33),
-                        Color(0xFF12263F),
-                    ),
-                ),
-            ),
+            .background(Color.Black),
     ) {
         if (hasCameraPermission) {
             key(lens, flash) {
@@ -176,6 +216,26 @@ fun CameraScreen(
                                 flashMode = flash,
                                 onAnalyze = { imageProxy -> viewModel.onFrame(imageProxy) },
                                 onImageCaptureReady = { capture -> imageCapture = capture },
+                                onCameraReady = { camera ->
+                                    activeCamera = camera
+                                    val zoomState = camera.cameraInfo.zoomState.value
+                                    val min = zoomState?.minZoomRatio ?: 1f
+                                    val max = zoomState?.maxZoomRatio ?: 6f
+                                    minZoomRatio = min.coerceAtLeast(1f)
+                                    maxZoomRatio = max.coerceAtLeast(minZoomRatio + 0.01f)
+                                    zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+
+                                    hasFlashUnit = camera.cameraInfo.hasFlashUnit()
+                                    if (!hasFlashUnit || lens == CameraLens.FRONT) {
+                                        torchEnabled = false
+                                    }
+
+                                    val exposureState = camera.cameraInfo.exposureState
+                                    minExposureIndex = exposureState.exposureCompensationRange.lower
+                                    maxExposureIndex = exposureState.exposureCompensationRange.upper
+                                    exposureStepEv = exposureState.exposureCompensationStep.toFloat()
+                                    exposureIndex = exposureIndex.coerceIn(minExposureIndex, maxExposureIndex)
+                                },
                             )
                         }
                     },
@@ -204,7 +264,11 @@ fun CameraScreen(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = Color(0xAA032A49),
@@ -217,54 +281,38 @@ fun CameraScreen(
                     )
                 }
 
-                TextButton(onClick = openSettings) {
-                    Text("设置", color = Color.White)
-                }
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color(0xA6142A45),
-                ),
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                IconButton(
+                    onClick = openSettings,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(Color(0x80000000), CircleShape),
                 ) {
-                    Text(
-                        uiState.tipText,
-                        color = Color.White,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 2,
+                    Icon(
+                        imageVector = Icons.Outlined.Settings,
+                        contentDescription = "设置",
+                        tint = Color.White,
                     )
-                    if (uiState.moveHintText.isNotBlank()) {
-                        Text(
-                            text = uiState.moveHintText,
-                            color = Color(0xFFFFD08A),
-                            fontSize = 12.sp,
-                            maxLines = 2,
-                        )
-                    }
-                    if (uiState.analyzingTips) {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = Color(0xFF7CE3FF),
-                            trackColor = Color(0x334A7AA0),
-                        )
-                        Text(
-                            text = "AI 思考中，云端结果返回后将自动更新",
-                            color = Color(0xFFC5E8FF),
-                            fontSize = 12.sp,
-                        )
-                    }
-                    uiState.exposureSuggestion?.let { ev ->
-                        Text("曝光建议 EV: $ev", color = Color(0xFFC5E8FF), fontSize = 13.sp)
-                    }
                 }
             }
 
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0x8A10151C),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TopSettingIconButton(Icons.Outlined.FlashOn, "闪光灯") { activeSheet = CameraSettingSheet.FLASH }
+                    TopSettingIconButton(Icons.Outlined.ZoomIn, "焦距") { activeSheet = CameraSettingSheet.ZOOM }
+                    TopSettingIconButton(Icons.Outlined.Exposure, "曝光") { activeSheet = CameraSettingSheet.EXPOSURE }
+                    TopSettingIconButton(Icons.Outlined.Timer, "倒计时") { activeSheet = CameraSettingSheet.TIMER }
+                    TopSettingIconButton(Icons.Outlined.Cameraswitch, "镜头") { activeSheet = CameraSettingSheet.LENS }
+                }
+            }
         }
 
         if (uiState.analyzingTips) {
@@ -304,53 +352,103 @@ fun CameraScreen(
             }
         }
 
-        Card(
+        Column(
             modifier = Modifier
+                .fillMaxWidth()
                 .align(Alignment.BottomCenter)
-                .padding(horizontal = 14.dp, vertical = 16.dp),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xB010223A)),
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xF2FFFFFF)),
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CaptureMode.entries.forEach { mode ->
-                        FilterChip(
-                            selected = uiState.settings.captureMode == mode,
-                            onClick = { viewModel.updateCaptureMode(mode) },
-                            label = { Text(mode.label) },
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("AI 建议", color = Color(0xFF0F172A), fontWeight = FontWeight.SemiBold)
+                        TextButton(onClick = { aiPanelDetailed = !aiPanelDetailed }) {
+                            Text(if (aiPanelDetailed) "简略" else "详情")
+                        }
+                    }
+                    Text(
+                        text = uiState.tipText,
+                        color = Color(0xFF1E293B),
+                        maxLines = if (aiPanelDetailed) 3 else 2,
+                    )
+                    if (uiState.moveHintText.isNotBlank()) {
+                        Text(
+                            text = uiState.moveHintText,
+                            color = Color(0xFFB45309),
+                            fontSize = 12.sp,
                         )
                     }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    TextButton(
-                        enabled = !uiState.analyzingTips,
-                        onClick = { viewModel.requestAiAnalyze() },
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            if (uiState.analyzingTips) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
-                                    color = Color(0xFF7CE3FF),
-                                    strokeWidth = 2.dp,
-                                )
-                            }
+                    AnimatedVisibility(visible = aiPanelDetailed) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("状态：${uiState.statusText}", color = Color(0xFF64748B), fontSize = 12.sp)
                             Text(
-                                text = if (uiState.analyzingTips) "AI思考中" else "AI分析",
-                                color = if (uiState.analyzingTips) Color(0xFF7CE3FF) else Color.White,
+                                text = "稳定度 ${"%.0f".format(uiState.stabilityScore * 100)}% · 倾斜 ${"%.1f".format(abs(rollDegrees))}°",
+                                color = Color(0xFF64748B),
+                                fontSize = 12.sp,
                             )
+                            uiState.exposureSuggestion?.let {
+                                Text("曝光建议 EV：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    if (uiState.analyzingTips) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CaptureMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = uiState.settings.captureMode == mode,
+                        onClick = { viewModel.updateCaptureMode(mode) },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = Color(0xDDF8FAFC),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        TextButton(
+                            enabled = !uiState.analyzingTips,
+                            onClick = { viewModel.requestAiAnalyze() },
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Outlined.Tune, contentDescription = null)
+                                Text(if (uiState.analyzingTips) "分析中" else "AI 分析")
+                            }
                         }
                     }
 
@@ -389,78 +487,143 @@ fun CameraScreen(
                         Text(if (timerSec > 0) "${timerSec}s" else "拍照")
                     }
 
-                    TextButton(onClick = { showAdvancedControls = !showAdvancedControls }) {
-                        Text(if (showAdvancedControls) "收起" else "更多", color = Color.White)
-                    }
-                }
-
-                AnimatedVisibility(showAdvancedControls) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = lens == CameraLens.BACK,
-                                onClick = { lens = CameraLens.BACK },
-                                label = { Text("后摄") },
-                            )
-                            FilterChip(
-                                selected = lens == CameraLens.FRONT,
-                                onClick = {
-                                    lens = CameraLens.FRONT
-                                    flash = FlashMode.OFF
-                                },
-                                label = { Text("前摄") },
-                            )
-                        }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 38.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            FlashMode.entries.forEach { mode ->
-                                FilterChip(
-                                    selected = flash == mode,
-                                    onClick = { flash = mode },
-                                    label = { Text(mode.label) },
-                                )
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(0, 3, 5).forEach { sec ->
-                                FilterChip(
-                                    selected = timerSec == sec,
-                                    onClick = { timerSec = sec },
-                                    label = { Text(if (sec == 0) "无倒计时" else "${sec}s") },
-                                )
-                            }
-                        }
-                        val rollAbs = abs(rollDegrees)
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterEnd,
+                    ) {
                         Text(
-                            text = if (uiState.analyzingTips) {
-                                "正在请求云端建议..."
-                            } else {
-                                "模式 ${uiState.settings.captureMode.label} · ${uiState.statusText}"
-                            },
-                            color = Color(0xFF9BC4E2),
-                            fontSize = 12.sp,
-                        )
-                        Text(
-                            text = "稳定度 ${"%.0f".format(uiState.stabilityScore * 100)}% · ${if (uiState.frameStable) "已稳定" else "未稳定"}",
-                            color = Color(0xFF9BC4E2),
-                            fontSize = 12.sp,
-                        )
-                        Text(
-                            text = if (rollAbs >= 6f) {
-                                "水平辅助：画面倾斜 ${"%.1f".format(rollAbs)}°，请回正"
-                            } else {
-                                "水平辅助：已接近水平"
-                            },
-                            color = if (rollAbs >= 6f) Color(0xFFFFD08A) else Color(0xFF9BC4E2),
+                            text = if (timerSec > 0) "倒计时 ${timerSec}s" else "轻触拍摄",
+                            color = Color(0xFF64748B),
                             fontSize = 12.sp,
                         )
                     }
                 }
             }
+        }
+    }
+
+    activeSheet?.let { sheet ->
+        ModalBottomSheet(
+            onDismissRequest = { activeSheet = null },
+            containerColor = Color(0xFFF9FAFB),
+        ) {
+            SheetTitle(
+                when (sheet) {
+                    CameraSettingSheet.FLASH -> "闪光灯"
+                    CameraSettingSheet.ZOOM -> "焦距"
+                    CameraSettingSheet.EXPOSURE -> "曝光"
+                    CameraSettingSheet.TIMER -> "倒计时"
+                    CameraSettingSheet.LENS -> "镜头"
+                },
+            )
+
+            when (sheet) {
+                CameraSettingSheet.FLASH -> {
+                    val torchSupported = hasFlashUnit && lens == CameraLens.BACK
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FlashMode.entries.forEach { mode ->
+                                val enabled = lens == CameraLens.BACK || mode == FlashMode.OFF
+                                FilterChip(
+                                    selected = flash == mode,
+                                    enabled = enabled,
+                                    onClick = { if (enabled) flash = mode },
+                                    label = { Text(mode.label) },
+                                )
+                            }
+                        }
+                        FilterChip(
+                            selected = torchEnabled,
+                            enabled = torchSupported,
+                            onClick = { if (torchSupported) torchEnabled = !torchEnabled },
+                            label = {
+                                Text(
+                                    if (!torchSupported) "补光不可用"
+                                    else if (torchEnabled) "常亮补光：开"
+                                    else "常亮补光：关",
+                                )
+                            },
+                        )
+                    }
+                }
+
+                CameraSettingSheet.ZOOM -> {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        Text("当前 ${"%.1f".format(zoomRatio)}x")
+                        Slider(
+                            value = zoomRatio,
+                            onValueChange = { zoomRatio = it },
+                            valueRange = minZoomRatio..maxZoomRatio,
+                            enabled = maxZoomRatio > minZoomRatio,
+                        )
+                    }
+                }
+
+                CameraSettingSheet.EXPOSURE -> {
+                    val exposureSupported = maxExposureIndex > minExposureIndex
+                    val currentEv = exposureIndex * exposureStepEv
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        Text(
+                            if (exposureSupported) {
+                                "当前 ${if (currentEv >= 0f) "+" else ""}${"%.1f".format(currentEv)} EV"
+                            } else {
+                                "设备不支持曝光补偿"
+                            },
+                        )
+                        Slider(
+                            value = exposureIndex.toFloat(),
+                            onValueChange = { exposureIndex = it.toInt() },
+                            valueRange = minExposureIndex.toFloat()..maxExposureIndex.toFloat(),
+                            enabled = exposureSupported,
+                            steps = (maxExposureIndex - minExposureIndex - 1).coerceAtLeast(0),
+                        )
+                    }
+                }
+
+                CameraSettingSheet.TIMER -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        listOf(0, 3, 5, 10).forEach { sec ->
+                            FilterChip(
+                                selected = timerSec == sec,
+                                onClick = { timerSec = sec },
+                                label = { Text(if (sec == 0) "关闭" else "${sec}s") },
+                            )
+                        }
+                    }
+                }
+
+                CameraSettingSheet.LENS -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(
+                            selected = lens == CameraLens.BACK,
+                            onClick = { lens = CameraLens.BACK },
+                            label = { Text("后置") },
+                        )
+                        FilterChip(
+                            selected = lens == CameraLens.FRONT,
+                            onClick = {
+                                lens = CameraLens.FRONT
+                                flash = FlashMode.OFF
+                                torchEnabled = false
+                            },
+                            label = { Text("前置") },
+                        )
+                    }
+                }
+            }
+
+            androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(bottom = 24.dp))
         }
     }
 }
@@ -501,9 +664,48 @@ private fun rememberDeviceRollDegrees(): Float {
 private enum class CameraLens { BACK, FRONT }
 
 private enum class FlashMode(val label: String, val imageCaptureMode: Int) {
-    OFF("闪光关", ImageCapture.FLASH_MODE_OFF),
-    AUTO("闪光自动", ImageCapture.FLASH_MODE_AUTO),
-    ON("闪光开", ImageCapture.FLASH_MODE_ON),
+    OFF("关闭", ImageCapture.FLASH_MODE_OFF),
+    AUTO("自动", ImageCapture.FLASH_MODE_AUTO),
+    ON("开启", ImageCapture.FLASH_MODE_ON),
+}
+
+private enum class CameraSettingSheet {
+    FLASH,
+    ZOOM,
+    EXPOSURE,
+    TIMER,
+    LENS,
+}
+
+@Composable
+private fun TopSettingIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(34.dp)
+            .background(Color(0x5AFFFFFF), CircleShape),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+@Composable
+private fun SheetTitle(text: String) {
+    Text(
+        text = text,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        style = MaterialTheme.typography.titleMedium,
+        color = Color(0xFF0F172A),
+    )
 }
 
 private fun bindUseCases(
@@ -515,8 +717,9 @@ private fun bindUseCases(
     flashMode: FlashMode,
     onAnalyze: (androidx.camera.core.ImageProxy) -> Unit,
     onImageCaptureReady: (ImageCapture) -> Unit,
+    onCameraReady: (androidx.camera.core.Camera) -> Unit,
 ) {
-    val tag = "LiveAICapture"
+    val tag = "CamMate"
     val analysisSize = Size(512, 288)
     val providerFuture = ProcessCameraProvider.getInstance(context)
     providerFuture.addListener(
@@ -526,7 +729,7 @@ private fun bindUseCases(
                 it.surfaceProvider = previewView.surfaceProvider
             }
             val imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(flashMode.imageCaptureMode)
                 .build()
 
@@ -557,7 +760,7 @@ private fun bindUseCases(
 
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                val camera = cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     selector,
                     preview,
@@ -565,12 +768,13 @@ private fun bindUseCases(
                     imageAnalysis,
                 )
                 onImageCaptureReady(imageCapture)
+                onCameraReady(camera)
             } catch (e: Exception) {
-                Log.e(tag, "[camera.bind] 主相机绑定失败，尝试回退", e)
+                Log.e(tag, "[camera.bind] 主摄像头绑定失败，尝试回退", e)
                 if (lens == CameraLens.FRONT) {
                     try {
                         cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
+                        val fallbackCamera = cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
                             preview,
@@ -578,6 +782,7 @@ private fun bindUseCases(
                             imageAnalysis,
                         )
                         onImageCaptureReady(imageCapture)
+                        onCameraReady(fallbackCamera)
                         Toast.makeText(context, "前置相机不可用，已切换后置", Toast.LENGTH_SHORT).show()
                     } catch (fallbackError: Exception) {
                         Log.e(tag, "[camera.bind] 前置回退后置失败", fallbackError)
@@ -597,15 +802,15 @@ private fun capturePhoto(
     imageCapture: ImageCapture?,
     onSaved: (String?) -> Unit,
 ) {
-    val tag = "LiveAICapture"
+    val tag = "CamMate"
     val capture = imageCapture ?: return
 
     val fileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val contentValues = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, "LiveAICapture_$fileName")
+        put(MediaStore.MediaColumns.DISPLAY_NAME, "CamMate_$fileName")
         put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/LiveAICapture")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CamMate")
         }
     }
 
@@ -625,9 +830,10 @@ private fun capturePhoto(
             }
 
             override fun onError(exception: ImageCaptureException) {
-                Log.e(tag, "[camera.capture] 拍照失败", exception)
+                Log.e(tag, "[camera.capture] 鎷嶇収澶辫触", exception)
                 Toast.makeText(context, "拍照失败，请稍后重试", Toast.LENGTH_SHORT).show()
             }
         },
     )
 }
+

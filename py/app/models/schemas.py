@@ -10,7 +10,7 @@ class ClientContext(BaseModel):
     rotation_degrees: int = 0
     lens_facing: Literal["back", "front"] = "back"
     exposure_compensation: int = 0
-    capture_mode: Literal["auto", "portrait", "general"] = "auto"
+    capture_mode: Literal["auto", "portrait", "general", "food"] = "auto"
     scene_hint: str | None = Field(default=None, max_length=24)
     previous_tip_text: str | None = Field(default=None, max_length=120)
     recent_tip_texts: list[str] = Field(default_factory=list)
@@ -33,7 +33,7 @@ class SceneDetectRequest(BaseModel):
 class SceneDetectResponse(BaseModel):
     scene: Literal["portrait", "general", "landscape", "food", "night"] = "general"
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    mode: Literal["auto", "portrait", "general"] = "auto"
+    mode: Literal["auto", "portrait", "general", "food"] = "auto"
     bbox_norm: list[float] | None = None
     center_norm: list[float] | None = None
 

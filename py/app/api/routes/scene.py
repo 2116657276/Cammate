@@ -19,7 +19,11 @@ async def detect_scene(
     _: AuthUser = Depends(require_user),
 ) -> SceneDetectResponse:
     raw = validate_image_base64(req.image_base64)
-    result = get_scene_detector().detect(raw)
+    result = get_scene_detector().detect(
+        raw,
+        capture_mode=req.client_context.capture_mode,
+        scene_hint=req.client_context.scene_hint,
+    )
     logger.info(
         "scene.detect scene=%s conf=%.2f mode=%s has_bbox=%s",
         result.scene,

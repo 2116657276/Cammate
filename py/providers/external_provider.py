@@ -216,22 +216,27 @@ class ExternalProvider(VisionProvider):
 
     def _build_retry_prompt(self, detected_scene: str, client_context: dict[str, Any], retry_index: int) -> str:
         recent_tips = self._history_tips(client_context)
+        capture_mode = str(client_context.get("capture_mode") or "auto").strip().lower()
         scene_hint = str(client_context.get("scene_hint") or detected_scene).strip().lower()
+        if scene_hint == "landscape":
+            scene_hint = "general"
         subject_center = client_context.get("subject_center_norm")
         subject_bbox = client_context.get("subject_bbox_norm")
         return (
-            "只输出一条中文拍摄建议，不超过22字，不要解释，不要列表，不要思考过程。\n"
-            "本次建议必须不同于 recent_tip_texts 中任意一条，尤其不要重复三分线措辞。\n"
-            "如果主体已接近目标位置，禁止重复给位置建议，改给曝光/光线/背景建议。\n"
-            f"scene_hint={scene_hint}, retry_index={retry_index}, "
-            f"subject_center_norm={subject_center if subject_center else ['无']}, "
-            f"subject_bbox_norm={subject_bbox if subject_bbox else ['无']}, "
-            f"recent_tip_texts={recent_tips if recent_tips else ['无']}"
+            "只输出一条中文拍摄建议，不超过22字，不解释，不分点。\n"
+            "必须与 recent_tip_texts 不同，禁止重复三分线或居中建议。\n"
+            "若主体已接近目标点，改给曝光、光线或背景建议。\n"
+            f"mode={capture_mode}, scene_hint={scene_hint}, retry_index={retry_index}, "
+            f"subject_center_norm={subject_center if subject_center else ['none']}, "
+            f"subject_bbox_norm={subject_bbox if subject_bbox else ['none']}, "
+            f"recent_tip_texts={recent_tips if recent_tips else ['none']}"
         )
 
     def _build_prompt(self, detected_scene: str, client_context: dict[str, Any]) -> str:
         capture_mode = str(client_context.get("capture_mode") or "auto").strip().lower()
         scene_hint = str(client_context.get("scene_hint") or detected_scene).strip().lower()
+        if scene_hint == "landscape":
+            scene_hint = "general"
         frame_stable = bool(client_context.get("frame_stable", False))
         stability_score = float(client_context.get("stability_score", 0.0) or 0.0)
         recent_tips = self._history_tips(client_context)
@@ -239,34 +244,44 @@ class ExternalProvider(VisionProvider):
         subject_bbox = client_context.get("subject_bbox_norm")
 
         return (
-            "你是摄影指导助手。仅给最终结果，不要思考过程。\n"
-            "目标: 给出一条当前最能提升成片质量的建议。\n"
-            "输出优先为JSON，不要markdown，不要解释:\n"
+            "你是手机摄影构图助手，只输出最终结论，不要思考过程。\n"
+            "目标：给出一条当前最能提升成片质量的建议。\n"
+            "优先输出 JSON，不要 markdown，不要解释：\n"
             '{"strategy":{"grid":"thirds|center|none","target_point_norm":[0~1,0~1]},'
             '"ui":{"text":"<=24字中文建议","level":"info|warn"},'
             '"param":{"exposure_compensation":-2..2}}\n'
-            "若无法给JSON，退化为一条<=22字中文建议（纯文本）。\n"
-            "约束:\n"
+            "若无法输出 JSON，退化为一条<=22字中文建议（纯文本）。\n"
+            "约束：\n"
             "1) 只给一条建议；\n"
-            "2) 可在 thirds/center/none 中自由选择，不要固定三分线；\n"
-            "3) 若 recent_tip_texts 非空，本次必须与其中任意一条动作不同；\n"
-            "4) 若 frame_stable=false 或 stability_score<0.78，优先提示先稳住画面；\n"
-            "5) 若 subject_center_norm 已接近 target_point_norm(<=0.06)，不要再提放到三分线或居中；\n"
-            "6) 若输出JSON，坐标保留2位小数。\n"
+            "2) thirds/center/none 可自由选择，不要固定三分线；\n"
+            "3) 若 recent_tip_texts 非空，本次动作必须与历史不同；\n"
+            "4) 若 frame_stable=false 或 stability_score<0.78，优先提示先稳住；\n"
+            "5) 若主体已接近目标点(<=0.06)，不要重复位置建议；\n"
+            "6) 若输出 JSON，坐标保留2位小数。\n"
             f"模式策略: {self._mode_prompt(capture_mode)}\n"
+            f"场景策略: {self._scene_prompt(scene_hint)}\n"
             f"scene_hint={scene_hint}, detector_scene={detected_scene}, "
             f"frame_stable={frame_stable}, stability_score={stability_score:.2f}, "
-            f"subject_center_norm={subject_center if subject_center else ['无']}, "
-            f"subject_bbox_norm={subject_bbox if subject_bbox else ['无']}, "
-            f"recent_tip_texts={recent_tips if recent_tips else ['无']}"
+            f"subject_center_norm={subject_center if subject_center else ['none']}, "
+            f"subject_bbox_norm={subject_bbox if subject_bbox else ['none']}, "
+            f"recent_tip_texts={recent_tips if recent_tips else ['none']}"
         )
 
     def _mode_prompt(self, capture_mode: str) -> str:
         if capture_mode == "portrait":
-            return "人像模式：优先人物表情和眼神，建议姿态与留白。"
+            return "人像模式：优先面部/眼神、头肩比例、人物与背景分离。"
+        if capture_mode == "food":
+            return "美食模式：优先食物主体、纹理细节和盘面整洁，少给人物构图建议。"
         if capture_mode == "general":
-            return "通用模式：优先提升主体突出度和画面平衡。"
-        return "自动模式：根据 scene_hint 选择一条当前最优建议。"
+            return "通用模式：优先主体清晰、画面平衡、背景简洁。"
+        return "自动模式：结合 scene_hint 在人像/通用/美食三类策略中选当前最优。"
+
+    def _scene_prompt(self, scene_hint: str) -> str:
+        if scene_hint == "portrait":
+            return "主体是人，优先人脸或头肩落位、视线方向和留白。"
+        if scene_hint == "food":
+            return "主体是食物，优先餐品占比、俯拍或45度角和高光控制。"
+        return "主体为通用场景（含风景），优先层次、水平线和视觉重心。"
 
     def _extract_text(self, response_data: dict[str, Any]) -> str:
         # 1) Some APIs provide output_text directly.
@@ -463,11 +478,11 @@ class ExternalProvider(VisionProvider):
 
         tip = ""
         for i, line in enumerate(cleaned):
-            if "构图建议" in line and i + 1 < len(cleaned):
+            if "鏋勫浘寤鸿" in line and i + 1 < len(cleaned):
                 tip = cleaned[i + 1]
                 break
         for line in cleaned:
-            if any(k in line for k in ("建议", "对齐", "放在", "靠近", "留白", "构图", "水平", "稳住", "曝光")):
+            if any(k in line for k in ("寤鸿", "瀵归綈", "鏀惧湪", "闈犺繎", "鐣欑櫧", "鏋勫浘", "姘村钩", "绋充綇", "鏇濆厜")):
                 tip = line
                 break
         if not tip:
@@ -524,6 +539,8 @@ class ExternalProvider(VisionProvider):
     def _default_grid(self, detected_scene: str, capture_mode: str) -> str:
         if capture_mode == "portrait" or detected_scene == "portrait":
             return "center"
+        if capture_mode == "food":
+            return "thirds"
         if detected_scene in {"landscape", "food"}:
             return "thirds"
         if capture_mode == "general":
@@ -664,7 +681,7 @@ class ExternalProvider(VisionProvider):
         dist = (dx * dx + dy * dy) ** 0.5
         if dist > 0.06:
             return False
-        move_tokens = ("放在", "移到", "移至", "靠近", "居中", "三分", "交点", "左移", "右移", "上移", "下移")
+        move_tokens = ("鏀惧湪", "绉诲埌", "绉昏嚦", "闈犺繎", "灞呬腑", "涓夊垎", "浜ょ偣", "宸︾Щ", "鍙崇Щ", "涓婄Щ", "涓嬬Щ")
         return any(token in tip_text for token in move_tokens)
 
     def _response_schema(self) -> dict[str, Any]:

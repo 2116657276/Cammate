@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "LiveAICapture_MVP"
+rootProject.name = "CamMate"
 include(":app")

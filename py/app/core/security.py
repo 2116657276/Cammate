@@ -13,7 +13,20 @@ from app.core.config import SETTINGS
 
 
 def normalize_email(email: str) -> str:
-    return email.strip().lower()
+    value = email.strip().lower()
+    # Normalize common full-width/Chinese punctuation from mobile keyboards.
+    replacements = {
+        "\uFF20": "@",  # full-width @
+        "\u3002": ".",  # ideographic full stop
+        "\uFF0E": ".",  # full-width dot
+        "\uFE52": ".",  # small full stop
+        "\uFF61": ".",  # half-width ideographic full stop
+        "\u200B": "",   # zero-width space
+        "\u00A0": "",   # non-breaking space
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return value
 
 
 def validate_email(email: str) -> str:

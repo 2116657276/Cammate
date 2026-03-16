@@ -1,36 +1,26 @@
 package com.liveaicapture.mvp.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
-private val DarkColors = darkColorScheme(
-    primary = Sky300,
-    secondary = Slate100,
-    tertiary = Coral300,
-    background = Ocean900,
-    surface = Ocean700,
-)
-
-private val ColorWhite = androidx.compose.ui.graphics.Color(0xFFFFFFFF)
-
-private val LightColors = lightColorScheme(
-    primary = Ocean500,
-    secondary = Ocean700,
-    tertiary = Coral300,
-    background = Ice100,
-    surface = ColorWhite,
+private val CamMateLightColors = lightColorScheme(
+    primary = CamPrimary,
+    onPrimary = CamSurface,
+    secondary = CamTextSecondary,
+    background = CamBg,
+    onBackground = CamText,
+    surface = CamSurface,
+    onSurface = CamText,
+    error = CamDanger,
 )
 
 @Composable
-fun LiveAICaptureTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+fun CamMateTheme(
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
+        colorScheme = CamMateLightColors,
         typography = Typography,
         content = content,
     )

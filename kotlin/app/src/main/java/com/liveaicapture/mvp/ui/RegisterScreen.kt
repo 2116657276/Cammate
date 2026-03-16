@@ -1,16 +1,9 @@
 package com.liveaicapture.mvp.ui
 
 import android.widget.Toast
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,15 +11,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.liveaicapture.mvp.ui.components.CamMatePage
+import com.liveaicapture.mvp.ui.components.SectionCard
 
 @Composable
 fun RegisterScreen(
@@ -41,8 +33,21 @@ fun RegisterScreen(
     var password by rememberSaveable { mutableStateOf("") }
     var confirmPassword by rememberSaveable { mutableStateOf("") }
 
+    val emailNormalized = email.trim()
+        .replace('\uFF20', '@')
+        .replace('\u3002', '.')
+        .replace('\uFF0E', '.')
+    val emailValid = Regex("""[^@\s]+@[^@\s]+\.[^@\s]+""").matches(emailNormalized)
     val passwordMatched = password == confirmPassword
-    val canSubmit = email.isNotBlank() && password.length >= 6 && passwordMatched && !authState.loading
+    val nicknameTooLong = nickname.trim().length > 32
+    val canSubmit = (
+        emailNormalized.isNotBlank() &&
+            emailValid &&
+            !nicknameTooLong &&
+            password.length >= 6 &&
+            passwordMatched &&
+            !authState.loading
+        )
 
     LaunchedEffect(authState.errorMessage) {
         authState.errorMessage?.takeIf { it.isNotBlank() }?.let {
@@ -50,28 +55,13 @@ fun RegisterScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF0D1020), Color(0xFF213050), Color(0xFF31486D)),
-                ),
-            )
-            .padding(20.dp),
-        verticalArrangement = Arrangement.Center,
+    CamMatePage(
+        title = "创建 CamMate 账号",
+        subtitle = "注册后即可使用完整拍摄流程",
+        onBack = onBackToLogin,
     ) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xC6203551)),
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("创建账号", color = Color.White, fontWeight = FontWeight.SemiBold)
-
+        item {
+            SectionCard {
                 OutlinedTextField(
                     value = nickname,
                     onValueChange = {
@@ -100,7 +90,7 @@ fun RegisterScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("密码（至少6位）") },
+                    label = { Text("密码（至少 6 位）") },
                 )
                 OutlinedTextField(
                     value = confirmPassword,
@@ -114,14 +104,20 @@ fun RegisterScreen(
                 )
 
                 if (!passwordMatched && confirmPassword.isNotBlank()) {
-                    Text("两次密码不一致", color = Color(0xFFFFB4AB))
+                    Text("两次输入的密码不一致", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                }
+                if (email.isNotBlank() && !emailValid) {
+                    Text("邮箱格式不正确", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                }
+                if (nicknameTooLong) {
+                    Text("昵称最多 32 个字符", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
                 }
                 authState.errorMessage?.let {
-                    Text(it, color = Color(0xFFFFB4AB))
+                    Text(it, color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
                 }
 
                 Button(
-                    onClick = { viewModel.register(email.trim(), password, nickname.trim()) },
+                    onClick = { viewModel.register(emailNormalized, password, nickname.trim()) },
                     enabled = canSubmit,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -129,7 +125,7 @@ fun RegisterScreen(
                 }
 
                 TextButton(onClick = onBackToLogin, modifier = Modifier.fillMaxWidth()) {
-                    Text("已有账号，返回登录", color = Color(0xFFBCE8FF))
+                    Text("已有账号，返回登录")
                 }
             }
         }

@@ -10,9 +10,10 @@ Android + FastAPI 的 AI 拍摄应用，支持完整流程：
 ├── kotlin/                # Android 客户端（Jetpack Compose + CameraX）
 ├── py/                    # FastAPI 服务端
 │   ├── app/               # 路由、服务、模型、核心配置
-│   ├── models/            # YOLO 模型目录
+│   ├── app/vision/        # 视觉检测模块（YOLO 场景 + YuNet 人脸 + 融合）
+│   ├── models/            # 模型目录（scene_yolo11n.pt / face_detection_yunet_2023mar.onnx）
 │   ├── main.py            # 服务入口（导出 app）
-│   ├── scene_detector.py  # YOLO11 场景识别 + 主体框输出
+│   ├── scene_detector.py  # 兼容入口（内部转发到 app/vision）
 │   └── requirements.txt
 └── README.md
 ```
@@ -60,22 +61,25 @@ curl http://127.0.0.1:8000/healthz
 - 模拟器：`http://10.0.2.2:8000`
 - 真机：`http://<你的电脑局域网IP>:8000`
 
-## YOLO 说明（已部署预训练）
+## 视觉模型说明（YOLO + YuNet）
 
-当前默认使用 **Ultralytics YOLO11 预训练模型**：
-- 本地路径：`py/models/scene_yolo11n.pt`
-- 来源：`https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n.pt`
-- SHA256：`0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1`
+当前默认使用以下模型（均在 `py/models/`）：
+- `scene_yolo11n.pt`：YOLO 场景识别与人体/物体候选框
+- `face_detection_yunet_2023mar.onnx`：YuNet 人脸框（人像优先）
 
 识别策略：
-1. `SCENE_YOLO_CUSTOM_MODEL`（若配置）
-2. `SCENE_YOLO_MODEL`（默认 `./models/scene_yolo11n.pt`）
-3. 若模型不可用，返回 `general`（不使用本地构图建议回退）
+1. YOLO 先识别场景与候选框
+2. 人像模式优先用 YuNet 出脸框；无脸时回退 YOLO 的头肩/上半身框
+3. 非人像模式若有人，优先 YOLO 人体/上半身框；否则用场景目标框
 
 推荐环境变量：
 
 ```bash
 export SCENE_YOLO_MODEL=./models/scene_yolo11n.pt
+export SCENE_YUNET_MODEL=./models/face_detection_yunet_2023mar.onnx
+export SCENE_YUNET_SCORE_THRESHOLD=0.70
+export SCENE_YUNET_NMS_THRESHOLD=0.30
+export SCENE_YUNET_TOP_K=256
 # 可选：你自己的模型
 # export SCENE_YOLO_CUSTOM_MODEL=./models/scene_yolo11_best.pt
 ```
@@ -143,8 +147,13 @@ export AI_PROVIDER=external
 - 冷却期间会快速返回“云端限流冷却中，请稍后再试”
 
 6. 画面移动指引
-- `scene/detect` 现在会返回 YOLO 主体框与中心点（若检测到）
+- `scene/detect` 现在会返回融合后的主体框与中心点（人像优先 YuNet）
 - `analyze` 返回目标点后，客户端会计算“移动方向/距离/角度”并在相机页显示移动建议与箭头提示
+
+8. 自动场景切换规则
+- 每次进入相机页，只允许一次自动场景切换
+- 若用户在相机页手动切换模式，本次拍摄会话不再自动切换
+- 离开相机页后再次进入，会重置为可自动切换一次
 
 7. Android 客户端日志
 - 客户端关键日志会写入应用私有目录：`files/logs/client.log`（自动轮转）

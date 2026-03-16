@@ -36,8 +36,10 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         scene = str(event.get("scene", "general")).strip().lower()
         if scene not in {"portrait", "general", "landscape", "food", "night"}:
             scene = "general"
+        if scene == "landscape":
+            scene = "general"
         mode = str(event.get("mode", "auto")).strip().lower()
-        if mode not in {"auto", "portrait", "general"}:
+        if mode not in {"auto", "portrait", "general", "food"}:
             mode = "auto"
         event["scene"] = scene
         event["mode"] = mode
@@ -86,12 +88,18 @@ async def event_stream(req: AnalyzeRequest):
     provider_timeout_sec = _read_timeout_sec()
     total_budget_sec = _read_total_budget_sec()
     client_ctx = _normalize_client_context(req.client_context.model_dump())
-    scene_hint = str(client_ctx.get("scene_hint") or "").strip().lower()
-    if scene_hint in {"portrait", "general", "landscape", "food", "night"}:
-        mode = "portrait" if scene_hint == "portrait" else "general"
-        scene_result = _SceneHintResult(scene=scene_hint, confidence=0.70, mode=mode)
-    else:
-        scene_result = detector.detect(raw_bytes)
+    capture_mode = str(client_ctx.get("capture_mode") or "auto").strip().lower()
+    if capture_mode not in {"auto", "portrait", "general", "food"}:
+        capture_mode = "auto"
+
+    scene_result = detector.detect(
+        raw_bytes,
+        capture_mode=capture_mode,
+        scene_hint=str(client_ctx.get("scene_hint") or ""),
+    )
+
+    # Keep provider prompt in sync with latest fused detector output.
+    client_ctx["scene_hint"] = scene_result.scene
 
     logger.info(
         "analyze.start id=%s scene=%s mode=%s stable=%s score=%.2f recent=%d has_prev=%s has_subject=%s",
@@ -207,13 +215,6 @@ def _read_total_budget_sec() -> float:
     except Exception:
         value = 13.8
     return max(4.0, min(15.0, value))
-
-
-class _SceneHintResult:
-    def __init__(self, scene: str, confidence: float, mode: str) -> None:
-        self.scene = scene
-        self.confidence = confidence
-        self.mode = mode
 
 
 def _normalize_client_context(client_ctx: dict[str, Any]) -> dict[str, Any]:
