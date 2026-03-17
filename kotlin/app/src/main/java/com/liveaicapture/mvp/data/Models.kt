@@ -42,15 +42,26 @@ enum class SceneType(val raw: String, val label: String) {
 }
 
 enum class RetouchPreset(val raw: String, val label: String) {
-    NATURAL("natural", "自然"),
-    PORTRAIT("portrait", "人像"),
-    FOOD("food", "美食"),
-    NIGHT("night", "夜景"),
-    CINEMATIC("cinematic", "电影感");
+    BG_CLEANUP("bg_cleanup", "背景净化"),
+    PORTRAIT_BEAUTY("portrait_beauty", "人像美化"),
+    COLOR_GRADE("color_grade", "电影调色");
 
     companion object {
-        fun fromRaw(raw: String): RetouchPreset = entries.firstOrNull { it.raw == raw } ?: NATURAL
+        fun fromRaw(raw: String): RetouchPreset {
+            val normalized = raw.trim().lowercase()
+            return when (normalized) {
+                "natural", "portrait", "portrait_beauty" -> PORTRAIT_BEAUTY
+                "food", "night", "cinematic", "color_grade" -> COLOR_GRADE
+                "bg_cleanup" -> BG_CLEANUP
+                else -> BG_CLEANUP
+            }
+        }
     }
+}
+
+enum class RetouchMode(val raw: String, val label: String) {
+    TEMPLATE("template", "模板"),
+    CUSTOM("custom", "自定义");
 }
 
 data class AppSettings(
@@ -83,6 +94,7 @@ data class CameraUiState(
     val sessionTipCount: Int = 0,
     val photoCount: Int = 0,
     val lastPhotoUri: String? = null,
+    val showPostCaptureChoice: Boolean = false,
     val detectedScene: SceneType = SceneType.GENERAL,
     val sceneConfidence: Float = 0f,
     val frameStable: Boolean = false,
@@ -118,12 +130,15 @@ data class StoredSession(
 
 data class RetouchUiState(
     val originalPhotoUri: String? = null,
-    val preset: RetouchPreset = RetouchPreset.NATURAL,
-    val strength: Float = 0.6f,
+    val preset: RetouchPreset = RetouchPreset.BG_CLEANUP,
+    val mode: RetouchMode = RetouchMode.TEMPLATE,
+    val customPrompt: String = "",
+    val strength: Float = 0.35f,
     val applying: Boolean = false,
     val previewBase64: String? = null,
     val provider: String = "",
     val model: String = "",
+    val requestId: String = "",
     val sceneHint: SceneType = SceneType.GENERAL,
     val errorMessage: String? = null,
 )

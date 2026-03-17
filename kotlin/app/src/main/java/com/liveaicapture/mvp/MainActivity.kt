@@ -106,6 +106,7 @@ fun CamMateApp() {
                         launchSingleTop = true
                     }
                 },
+                openFeedback = { navController.navigate("feedback") },
             )
         }
         composable("settings") {

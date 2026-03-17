@@ -67,9 +67,19 @@ class LogoutResponse(BaseModel):
 
 class RetouchRequest(BaseModel):
     image_base64: str = Field(min_length=16)
-    preset: Literal["natural", "portrait", "food", "night", "cinematic"] = "natural"
-    strength: float = Field(default=0.6, ge=0.0, le=1.0)
+    preset: Literal[
+        "bg_cleanup",
+        "portrait_beauty",
+        "color_grade",
+        "natural",
+        "portrait",
+        "food",
+        "night",
+        "cinematic",
+    ] = "portrait_beauty"
+    strength: float = Field(default=0.35, ge=0.0, le=1.0)
     scene_hint: str | None = Field(default=None, max_length=24)
+    custom_prompt: str | None = Field(default=None, max_length=240)
 
 
 class RetouchResponse(BaseModel):

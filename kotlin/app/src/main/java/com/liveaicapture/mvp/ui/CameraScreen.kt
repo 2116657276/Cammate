@@ -72,6 +72,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -96,6 +97,8 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -106,6 +109,7 @@ fun CameraScreen(
     viewModel: MainViewModel,
     openSettings: () -> Unit,
     openRetouch: () -> Unit,
+    openFeedback: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -139,8 +143,8 @@ fun CameraScreen(
     var flash by rememberSaveable { mutableStateOf(FlashMode.OFF) }
     var timerSec by rememberSaveable { mutableIntStateOf(0) }
     var zoomRatio by rememberSaveable { mutableFloatStateOf(1f) }
-    var minZoomRatio by rememberSaveable { mutableFloatStateOf(1f) }
-    var maxZoomRatio by rememberSaveable { mutableFloatStateOf(6f) }
+    var minZoomRatio by rememberSaveable { mutableFloatStateOf(0.5f) }
+    var maxZoomRatio by rememberSaveable { mutableFloatStateOf(5f) }
     var exposureIndex by rememberSaveable { mutableIntStateOf(0) }
     var minExposureIndex by rememberSaveable { mutableIntStateOf(0) }
     var maxExposureIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -153,7 +157,9 @@ fun CameraScreen(
     var captureJob by remember { mutableStateOf<Job?>(null) }
 
     DisposableEffect(Unit) {
+        viewModel.onCameraSessionEntered()
         onDispose {
+            viewModel.onCameraSessionExited()
             captureJob?.cancel()
             analysisExecutor.shutdown()
         }
@@ -194,13 +200,25 @@ fun CameraScreen(
         camera.cameraControl.enableTorch(enabled)
     }
 
+    LaunchedEffect(flash) {
+        if (flash != FlashMode.OFF && torchEnabled) {
+            torchEnabled = false
+        }
+    }
+
+    LaunchedEffect(torchEnabled) {
+        if (torchEnabled && flash != FlashMode.OFF) {
+            flash = FlashMode.OFF
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
         if (hasCameraPermission) {
-            key(lens, flash) {
+            key(lens) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -219,14 +237,18 @@ fun CameraScreen(
                                 onCameraReady = { camera ->
                                     activeCamera = camera
                                     val zoomState = camera.cameraInfo.zoomState.value
-                                    val min = zoomState?.minZoomRatio ?: 1f
-                                    val max = zoomState?.maxZoomRatio ?: 6f
-                                    minZoomRatio = min.coerceAtLeast(1f)
-                                    maxZoomRatio = max.coerceAtLeast(minZoomRatio + 0.01f)
+                                    val hwMin = zoomState?.minZoomRatio ?: 1f
+                                    val hwMax = zoomState?.maxZoomRatio ?: 6f
+                                    val uiMin = max(0.5f, hwMin)
+                                    val rawUiMax = min(5f, hwMax)
+                                    val uiMax = if (rawUiMax < uiMin) uiMin else rawUiMax
+                                    minZoomRatio = uiMin
+                                    maxZoomRatio = uiMax
                                     zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
 
                                     hasFlashUnit = camera.cameraInfo.hasFlashUnit()
                                     if (!hasFlashUnit || lens == CameraLens.FRONT) {
+                                        flash = FlashMode.OFF
                                         torchEnabled = false
                                     }
 
@@ -420,9 +442,16 @@ fun CameraScreen(
             ) {
                 CaptureMode.entries.forEach { mode ->
                     FilterChip(
+                        modifier = Modifier.weight(1f),
                         selected = uiState.settings.captureMode == mode,
                         onClick = { viewModel.updateCaptureMode(mode) },
-                        label = { Text(mode.label) },
+                        label = {
+                            Text(
+                                text = mode.label,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                            )
+                        },
                     )
                 }
             }
@@ -465,11 +494,10 @@ fun CameraScreen(
                                 capturePhoto(
                                     context = context,
                                     imageCapture = imageCapture,
+                                    flashMode = flash,
+                                    lens = lens,
                                 ) { uriString ->
                                     viewModel.onPhotoCaptured(uriString)
-                                    if (!uriString.isNullOrBlank()) {
-                                        openRetouch()
-                                    }
                                 }
                                 countdown = 0
                             }.also { job ->
@@ -524,15 +552,25 @@ fun CameraScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
                             FlashMode.entries.forEach { mode ->
-                                val enabled = lens == CameraLens.BACK || mode == FlashMode.OFF
+                                val enabled = (lens == CameraLens.BACK && hasFlashUnit) || mode == FlashMode.OFF
                                 FilterChip(
                                     selected = flash == mode,
                                     enabled = enabled,
-                                    onClick = { if (enabled) flash = mode },
+                                    onClick = {
+                                        if (enabled) {
+                                            flash = mode
+                                            if (mode != FlashMode.OFF) torchEnabled = false
+                                        }
+                                    },
+                                    modifier = Modifier.padding(horizontal = 4.dp),
                                     label = { Text(mode.label) },
                                 )
                             }
@@ -540,7 +578,12 @@ fun CameraScreen(
                         FilterChip(
                             selected = torchEnabled,
                             enabled = torchSupported,
-                            onClick = { if (torchSupported) torchEnabled = !torchEnabled },
+                            onClick = {
+                                if (torchSupported) {
+                                    torchEnabled = !torchEnabled
+                                    if (torchEnabled) flash = FlashMode.OFF
+                                }
+                            },
                             label = {
                                 Text(
                                     if (!torchSupported) "补光不可用"
@@ -549,25 +592,52 @@ fun CameraScreen(
                                 )
                             },
                         )
+                        if (lens == CameraLens.FRONT) {
+                            Text("前置镜头不支持闪光与补光", color = Color(0xFF64748B), fontSize = 12.sp)
+                        } else if (!hasFlashUnit) {
+                            Text("当前后置镜头无闪光灯硬件", color = Color(0xFF64748B), fontSize = 12.sp)
+                        } else {
+                            Text("闪光模式与常亮补光互斥", color = Color(0xFF64748B), fontSize = 12.sp)
+                        }
                     }
                 }
 
                 CameraSettingSheet.ZOOM -> {
-                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    val supportsHalf = minZoomRatio <= 0.5f + 0.01f
+                    val supportsFive = maxZoomRatio >= 5f - 0.01f
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
                         Text("当前 ${"%.1f".format(zoomRatio)}x")
                         Slider(
                             value = zoomRatio,
                             onValueChange = { zoomRatio = it },
                             valueRange = minZoomRatio..maxZoomRatio,
                             enabled = maxZoomRatio > minZoomRatio,
+                            modifier = Modifier.fillMaxWidth(0.92f),
                         )
+                        if (!supportsHalf || !supportsFive) {
+                            Text(
+                                text = "当前设备可用范围 ${"%.1f".format(minZoomRatio)}x ~ ${"%.1f".format(maxZoomRatio)}x",
+                                color = Color(0xFF64748B),
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
                 }
 
                 CameraSettingSheet.EXPOSURE -> {
                     val exposureSupported = maxExposureIndex > minExposureIndex
                     val currentEv = exposureIndex * exposureStepEv
-                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
                         Text(
                             if (exposureSupported) {
                                 "当前 ${if (currentEv >= 0f) "+" else ""}${"%.1f".format(currentEv)} EV"
@@ -581,19 +651,23 @@ fun CameraScreen(
                             valueRange = minExposureIndex.toFloat()..maxExposureIndex.toFloat(),
                             enabled = exposureSupported,
                             steps = (maxExposureIndex - minExposureIndex - 1).coerceAtLeast(0),
+                            modifier = Modifier.fillMaxWidth(0.92f),
                         )
                     }
                 }
 
                 CameraSettingSheet.TIMER -> {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.Center,
                     ) {
                         listOf(0, 3, 5, 10).forEach { sec ->
                             FilterChip(
                                 selected = timerSec == sec,
                                 onClick = { timerSec = sec },
+                                modifier = Modifier.padding(horizontal = 4.dp),
                                 label = { Text(if (sec == 0) "关闭" else "${sec}s") },
                             )
                         }
@@ -602,12 +676,15 @@ fun CameraScreen(
 
                 CameraSettingSheet.LENS -> {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.Center,
                     ) {
                         FilterChip(
                             selected = lens == CameraLens.BACK,
                             onClick = { lens = CameraLens.BACK },
+                            modifier = Modifier.padding(horizontal = 4.dp),
                             label = { Text("后置") },
                         )
                         FilterChip(
@@ -617,6 +694,7 @@ fun CameraScreen(
                                 flash = FlashMode.OFF
                                 torchEnabled = false
                             },
+                            modifier = Modifier.padding(horizontal = 4.dp),
                             label = { Text("前置") },
                         )
                     }
@@ -624,6 +702,59 @@ fun CameraScreen(
             }
 
             androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(bottom = 24.dp))
+        }
+    }
+
+    if (uiState.showPostCaptureChoice && !uiState.lastPhotoUri.isNullOrBlank()) {
+        ModalBottomSheet(
+            onDismissRequest = { viewModel.dismissPostCaptureChoice() },
+            containerColor = Color(0xFFF9FAFB),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "照片已保存，下一步怎么做？",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color(0xFF0F172A),
+                )
+                Text(
+                    text = "你可以直接继续原图，也可以先进入 AI 修图。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFF64748B),
+                    textAlign = TextAlign.Center,
+                )
+                Button(
+                    onClick = {
+                        viewModel.dismissPostCaptureChoice()
+                        viewModel.continueWithOriginalPhoto()
+                        openFeedback()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("继续原图")
+                }
+                Button(
+                    onClick = {
+                        viewModel.dismissPostCaptureChoice()
+                        openRetouch()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("进入 AI 修图")
+                }
+                TextButton(
+                    onClick = { viewModel.dismissPostCaptureChoice() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("返回拍摄")
+                }
+                Spacer(modifier = Modifier.padding(bottom = 24.dp))
+            }
         }
     }
 }
@@ -702,9 +833,12 @@ private fun TopSettingIconButton(
 private fun SheetTitle(text: String) {
     Text(
         text = text,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         style = MaterialTheme.typography.titleMedium,
         color = Color(0xFF0F172A),
+        textAlign = TextAlign.Center,
     )
 }
 
@@ -800,10 +934,13 @@ private fun bindUseCases(
 private fun capturePhoto(
     context: Context,
     imageCapture: ImageCapture?,
+    flashMode: FlashMode,
+    lens: CameraLens,
     onSaved: (String?) -> Unit,
 ) {
     val tag = "CamMate"
     val capture = imageCapture ?: return
+    capture.flashMode = flashMode.imageCaptureMode
 
     val fileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val contentValues = ContentValues().apply {
@@ -814,11 +951,17 @@ private fun capturePhoto(
         }
     }
 
+    val metadata = ImageCapture.Metadata().apply {
+        // Make front-camera captures consistent with what users see in preview.
+        isReversedHorizontal = lens == CameraLens.FRONT
+    }
     val outputOptions = ImageCapture.OutputFileOptions.Builder(
         context.contentResolver,
         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
         contentValues,
-    ).build()
+    )
+        .setMetadata(metadata)
+        .build()
 
     capture.takePicture(
         outputOptions,
@@ -830,10 +973,9 @@ private fun capturePhoto(
             }
 
             override fun onError(exception: ImageCaptureException) {
-                Log.e(tag, "[camera.capture] 鎷嶇収澶辫触", exception)
+                Log.e(tag, "[camera.capture] 拍照失败", exception)
                 Toast.makeText(context, "拍照失败，请稍后重试", Toast.LENGTH_SHORT).show()
             }
         },
     )
 }
-

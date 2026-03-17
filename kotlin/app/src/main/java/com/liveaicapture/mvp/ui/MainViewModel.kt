@@ -2,6 +2,7 @@ package com.liveaicapture.mvp.ui
 
 import android.app.Application
 import android.content.ContentValues
+import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
 import androidx.camera.core.ImageProxy
@@ -17,6 +18,7 @@ import com.liveaicapture.mvp.data.CameraUiState
 import com.liveaicapture.mvp.data.CaptureMode
 import com.liveaicapture.mvp.data.FeedbackUiState
 import com.liveaicapture.mvp.data.GuideProvider
+import com.liveaicapture.mvp.data.RetouchMode
 import com.liveaicapture.mvp.data.RetouchPreset
 import com.liveaicapture.mvp.data.RetouchUiState
 import com.liveaicapture.mvp.data.SceneType
@@ -26,6 +28,7 @@ import com.liveaicapture.mvp.log.AppLog
 import com.liveaicapture.mvp.network.AnalyzeApiClient
 import com.liveaicapture.mvp.network.AuthApiClient
 import com.liveaicapture.mvp.network.FeedbackApiClient
+import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
 import com.liveaicapture.mvp.tts.TtsSpeaker
 import java.text.SimpleDateFormat
@@ -53,6 +56,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val STABLE_SCENE_DETECT_INTERVAL_MS = 12_000L
         private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 2_500L
         private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
+        private const val SCENE_SWITCH_BOOST_WINDOW_MS = 2_000L
+        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 1_200L
     }
 
     private val settingsRepository = SettingsRepository(application)
@@ -61,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sceneApiClient = SceneApiClient()
     private val authApiClient = AuthApiClient()
     private val feedbackApiClient = FeedbackApiClient()
+    private val retouchApiClient = RetouchApiClient()
     private val ttsSpeaker = TtsSpeaker(application)
     private val appLogger = AppLog.get(application)
 
@@ -101,6 +107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var nextAnalyzeAllowedAtMs = 0L
     private var sceneAutoSwitchUsed = false
     private var sceneAutoSwitchLockedByManual = false
+    private var sceneFastDetectUntilMs = 0L
 
     private var bearerToken: String = ""
 
@@ -289,6 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 aiEnabled = true,
                 tipText = "点击 AI分析 获取构图建议",
                 statusText = "请登录后开始拍摄",
+                showPostCaptureChoice = false,
                 overlay = it.overlay.copy(
                     grid = "none",
                     targetPointNorm = null,
@@ -313,6 +321,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sceneAutoSwitchUsed = false
         sceneAutoSwitchLockedByManual = false
         lastSceneClassifyAt = 0L
+        sceneFastDetectUntilMs = 0L
+        _uiState.update { it.copy(showPostCaptureChoice = false) }
     }
 
     fun onCameraSessionExited() {
@@ -359,10 +369,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val unstableDetectInterval = snapshot.settings.intervalMs
             .coerceIn(MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS, UNSTABLE_SCENE_DETECT_INTERVAL_MS)
-        val classifyInterval = if (isStable) {
+        val baseClassifyInterval = if (isStable) {
             STABLE_SCENE_DETECT_INTERVAL_MS
         } else {
             unstableDetectInterval
+        }
+        val classifyInterval = if (now < sceneFastDetectUntilMs) {
+            min(baseClassifyInterval, SCENE_SWITCH_BOOST_INTERVAL_MS)
+        } else {
+            baseClassifyInterval
         }
         val shouldClassify = now - lastSceneClassifyAt >= classifyInterval
         val shouldRefreshAnalyzeFrame = isStable && (now - lastStableFrameAtMs >= 1200L)
@@ -647,6 +662,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val incomingConfidence = event.confidence.coerceIn(0f, 1f)
                     val currentScene = it.detectedScene
                     val currentConfidence = it.sceneConfidence.coerceIn(0f, 1f)
+                    val sceneChanged = event.scene != currentScene
                     val autoModeEnabled = it.settings.captureMode == CaptureMode.AUTO
                     val confidenceAllowsSwitch = (
                         incomingConfidence >= 0.82f ||
@@ -662,6 +678,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             canAutoSwitchNow &&
                             confidenceAllowsSwitch
                         )
+
+                    if (sceneChanged) {
+                        sceneFastDetectUntilMs = max(
+                            sceneFastDetectUntilMs,
+                            System.currentTimeMillis() + SCENE_SWITCH_BOOST_WINDOW_MS,
+                        )
+                    }
 
                     if (event.scene == currentScene) {
                         it.copy(
@@ -729,15 +752,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             is AnalyzeEvent.Ui -> {
+                val normalizedTip = normalizeUiTipText(event.text)
                 _uiState.update {
                     it.copy(
-                        tipText = event.text,
+                        tipText = normalizedTip,
                         tipLevel = event.level,
                         sessionTipCount = it.sessionTipCount + 1,
                     )
                 }
                 if (event.level == "info") {
-                    val tip = event.text.trim()
+                    val tip = normalizedTip.trim()
                     lastSuccessfulTipText = tip
                     if (tip.isNotEmpty()) {
                         recentSuccessfulTips.remove(tip)
@@ -747,12 +771,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 } else {
-                    val lowered = event.text.lowercase()
+                    val lowered = normalizedTip.lowercase()
                     if (lowered.contains("限流") || lowered.contains("冷却")) {
                         nextAnalyzeAllowedAtMs = max(nextAnalyzeAllowedAtMs, System.currentTimeMillis() + 10_000L)
                     }
                 }
-                ttsSpeaker.speak(event.text, _uiState.value.settings.voiceEnabled)
+                ttsSpeaker.speak(normalizedTip, _uiState.value.settings.voiceEnabled)
             }
 
             is AnalyzeEvent.Param -> {
@@ -809,6 +833,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 photoCount = it.photoCount + 1,
                 lastPhotoUri = savedUri,
+                showPostCaptureChoice = !savedUri.isNullOrBlank(),
                 statusText = "照片已保存",
             )
         }
@@ -819,26 +844,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState()
     }
 
+    fun dismissPostCaptureChoice() {
+        _uiState.update { it.copy(showPostCaptureChoice = false) }
+    }
+
     fun updateRetouchPreset(preset: RetouchPreset) {
-        _retouchUiState.update { it.copy(preset = preset, errorMessage = null) }
+        _retouchUiState.update { it.copy(preset = preset, requestId = "", errorMessage = null) }
+    }
+
+    fun updateRetouchMode(mode: RetouchMode) {
+        _retouchUiState.update { it.copy(mode = mode, requestId = "", errorMessage = null) }
+    }
+
+    fun updateRetouchCustomPrompt(prompt: String) {
+        _retouchUiState.update { it.copy(customPrompt = prompt.take(240), requestId = "", errorMessage = null) }
     }
 
     fun updateRetouchStrength(strength: Float) {
-        _retouchUiState.update { it.copy(strength = strength.coerceIn(0f, 1f), errorMessage = null) }
+        _retouchUiState.update { it.copy(strength = strength.coerceIn(0f, 1f), requestId = "", errorMessage = null) }
     }
 
     fun applyRetouch() {
-        logClientInfo("retouch.apply", "skipped feature_not_ready")
-        _retouchUiState.update {
-            it.copy(
-                applying = false,
-                errorMessage = "AI修图功能暂未开放，请先使用原图继续",
-            )
+        val current = _retouchUiState.value
+        val sourceUri = current.originalPhotoUri
+        if (sourceUri.isNullOrBlank()) {
+            _retouchUiState.update { it.copy(errorMessage = "未找到原图，请重新拍摄") }
+            return
+        }
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _retouchUiState.update { it.copy(errorMessage = "请先登录后再使用 AI 修图") }
+            return
+        }
+        if (current.mode == RetouchMode.CUSTOM && current.customPrompt.trim().isBlank()) {
+            _retouchUiState.update { it.copy(errorMessage = "请输入自定义修图提示词") }
+            return
+        }
+        if (current.applying) {
+            return
+        }
+
+        viewModelScope.launch {
+            logClientInfo("retouch.apply", "start mode=${current.mode.raw} preset=${current.preset.raw}")
+            _retouchUiState.update { it.copy(applying = true, requestId = "", errorMessage = null) }
+            try {
+                val imageBase64 = encodePhotoUriToBase64(sourceUri)
+                val customPrompt = if (current.mode == RetouchMode.CUSTOM) current.customPrompt.trim() else null
+                val result = retouchApiClient.retouch(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    imageBase64 = imageBase64,
+                    preset = current.preset.raw,
+                    strength = current.strength,
+                    sceneHint = current.sceneHint.raw,
+                    customPrompt = customPrompt,
+                )
+                if (result.imageBase64.isBlank()) {
+                    throw IllegalStateException("empty retouched image")
+                }
+                _retouchUiState.update {
+                    it.copy(
+                        applying = false,
+                        previewBase64 = result.imageBase64,
+                        provider = result.provider,
+                        model = result.model,
+                        requestId = result.requestId,
+                        errorMessage = null,
+                    )
+                }
+                logClientInfo("retouch.apply", "success model=${result.model} req=${result.requestId}")
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "retouch.apply",
+                    throwable = e,
+                    userHint = "AI 修图失败",
+                )
+                _retouchUiState.update {
+                    it.copy(
+                        applying = false,
+                        requestId = extractRequestId(e),
+                        errorMessage = userFriendlyRetouchError(e),
+                    )
+                }
+            }
         }
     }
 
     fun continueWithOriginalPhoto() {
         val sourceUri = _retouchUiState.value.originalPhotoUri ?: return
+        _uiState.update { it.copy(showPostCaptureChoice = false) }
         _feedbackUiState.value = FeedbackUiState(
             visible = true,
             photoUri = sourceUri,
@@ -848,8 +941,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun restartRetouchFromOriginal() {
+        val current = _retouchUiState.value
+        _retouchUiState.value = current.copy(
+            mode = RetouchMode.TEMPLATE,
+            preset = RetouchPreset.BG_CLEANUP,
+            customPrompt = "",
+            strength = 0.35f,
+            applying = false,
+            previewBase64 = null,
+            provider = "",
+            model = "",
+            requestId = "",
+            errorMessage = null,
+        )
+    }
+
     fun continueWithRetouchedPhoto() {
         val retouched = _retouchUiState.value.previewBase64
+        _uiState.update { it.copy(showPostCaptureChoice = false) }
         if (retouched.isNullOrBlank()) {
             continueWithOriginalPhoto()
             return
@@ -904,12 +1014,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     photoUri = current.photoUri,
                     isRetouch = current.isRetouched,
                     sessionMeta = buildJsonObject {
+                        val retouchState = _retouchUiState.value
+                        val presetValue = if (retouchState.mode == RetouchMode.CUSTOM) "custom" else retouchState.preset.raw
                         put("frame_count", JsonPrimitive(_uiState.value.sessionFrameCount))
                         put("tip_count", JsonPrimitive(_uiState.value.sessionTipCount))
                         put("photo_count", JsonPrimitive(_uiState.value.photoCount))
                         put("capture_mode", JsonPrimitive(_uiState.value.settings.captureMode.raw))
                         put("guide_provider", JsonPrimitive(_uiState.value.settings.guideProvider.raw))
-                        put("retouch_preset", JsonPrimitive(_retouchUiState.value.preset.raw))
+                        put("retouch_preset", JsonPrimitive(presetValue))
+                        put("retouch_mode", JsonPrimitive(retouchState.mode.raw))
                     },
                 )
 
@@ -942,7 +1055,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun finishFeedbackFlow() {
         _feedbackUiState.value = FeedbackUiState()
         _retouchUiState.value = RetouchUiState()
-        _uiState.update { it.copy(statusText = "反馈已提交，感谢支持") }
+        _uiState.update { it.copy(statusText = "反馈已提交，感谢支持", showPostCaptureChoice = false) }
+    }
+
+    private fun encodePhotoUriToBase64(photoUri: String): String {
+        val app = getApplication<Application>()
+        val uri = Uri.parse(photoUri)
+        val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw IllegalStateException("无法读取原图")
+        if (bytes.isEmpty()) {
+            throw IllegalStateException("原图内容为空")
+        }
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     private fun saveBase64ToGallery(base64Data: String, prefix: String): String? {
@@ -991,6 +1115,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun userFriendlyRetouchError(throwable: Throwable?): String {
+        val raw = throwable?.message.orEmpty()
+        val lowered = raw.lowercase()
+        val reqId = extractRequestId(throwable)
+        val suffix = reqId.takeIf { it.isNotBlank() }?.let { "（req=$it）" }.orEmpty()
+        val base = when {
+            "ark_image_api_key missing" in lowered -> "修图服务未配置 ARK_IMAGE_API_KEY"
+            "http 401" in lowered || "http 403" in lowered -> "修图鉴权失败，请检查修图 API Key"
+            "http 429" in lowered -> "修图服务限流，请稍后重试"
+            "timed out" in lowered || "timeout" in lowered -> "修图超时，请稍后重试"
+            "invalid image_base64" in lowered || "invalid image bytes" in lowered -> "图片格式异常，请重新拍照后重试"
+            "http 5" in lowered -> "修图服务暂时不可用，请稍后重试"
+            else -> "AI 修图失败，请检查网络和服务配置"
+        }
+        return base + suffix
+    }
+
+    private fun extractRequestId(throwable: Throwable?): String {
+        val text = throwable?.message.orEmpty()
+        val match = Regex("""req=([A-Za-z0-9_\-]+)""").find(text) ?: return ""
+        return match.groupValues.getOrNull(1).orEmpty()
+    }
+
     private fun logClientError(scope: String, throwable: Throwable?, userHint: String) {
         val rawMessage = throwable?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "no throwable"
         if (throwable != null) {
@@ -1035,6 +1182,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateCaptureMode(mode: CaptureMode) {
         sceneAutoSwitchLockedByManual = true
+        sceneFastDetectUntilMs = max(sceneFastDetectUntilMs, System.currentTimeMillis() + SCENE_SWITCH_BOOST_WINDOW_MS)
+        lastSceneClassifyAt = 0L
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }
     }
 
@@ -1122,6 +1271,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val distancePct = (dist * 100f).toInt().coerceIn(1, 99)
         val angleDeg = Math.toDegrees(atan2(-dy.toDouble(), dx.toDouble())).toInt()
         return "移动建议：向${direction}约${distancePct}%（角度${angleDeg}°）"
+    }
+
+    private fun normalizeUiTipText(rawText: String): String {
+        val text = rawText.trim().ifBlank { "请微调构图" }
+        val overlay = _uiState.value.overlay
+        val target = overlay.targetPointNorm ?: return text
+        val hasDirectionWord = Regex(
+            """左上|右上|左下|右下|左侧|右侧|上方|下方|向左|向右|向上|向下|上三分|下三分|左三分|右三分|左边|右边""",
+        )
+            .containsMatchIn(text)
+        if (!hasDirectionWord) return text
+        return when (overlay.grid) {
+            "thirds" -> "构图目标：主体靠近三分线${thirdsCornerLabel(target)}交点，按箭头微调。"
+            "center" -> "构图目标：主体靠近画面中心，按箭头微调。"
+            else -> "构图目标：按箭头将主体移动到高亮目标点附近。"
+        }
+    }
+
+    private fun thirdsCornerLabel(target: Offset): String {
+        val x = target.x.coerceIn(0f, 1f)
+        val y = target.y.coerceIn(0f, 1f)
+        val horizontal = if (x < 0.5f) "左" else "右"
+        val vertical = if (y < 0.5f) "上" else "下"
+        return horizontal + vertical
     }
 
     private fun updateStableStreak(score: Float): Boolean {

@@ -241,13 +241,14 @@ class YoloSceneDetector:
             return SceneResult(scene="food", confidence=conf, mode="food")
 
         has_person_label = any(label in PERSON_LABELS and float(conf) >= 0.34 for label, conf in labels_with_conf)
-        has_food_label = any(label in FOOD_LABELS and float(conf) >= 0.30 for label, conf in labels_with_conf)
-        if has_person_label and has_food_label:
+        has_food_label = any(label in FOOD_LABELS and float(conf) >= 0.24 for label, conf in labels_with_conf)
+        has_drink_label = any(label in DRINK_CONTAINER_LABELS and float(conf) >= 0.18 for label, conf in labels_with_conf)
+        if has_person_label and (has_food_label or has_drink_label):
             return SceneResult(scene="portrait", confidence=0.58, mode="portrait")
         if has_person_label:
             return SceneResult(scene="general", confidence=0.56, mode="general")
-        if has_food_label:
-            return SceneResult(scene="food", confidence=0.56, mode="food")
+        if has_food_label or has_drink_label:
+            return SceneResult(scene="food", confidence=0.58, mode="food")
 
         max_conf = max((max(0.0, min(1.0, float(conf))) for _, conf in labels_with_conf), default=0.25)
         return SceneResult(
@@ -291,6 +292,8 @@ class YoloSceneDetector:
             return scene_result
         if scene_hint == "landscape":
             scene_hint = "general"
+        if scene_hint == "food" and scene_result.scene == "general" and scene_result.confidence < 0.68:
+            return SceneResult(scene="food", confidence=0.58, mode="food")
         if scene_hint == scene_result.scene:
             return scene_result
         if scene_result.confidence >= 0.56:
@@ -584,6 +587,12 @@ FOOD_LABELS = {
     "carrot",
     "bottle",
     "wine glass",
+}
+DRINK_CONTAINER_LABELS = {
+    "cup",
+    "bottle",
+    "wine glass",
+    "mug",
 }
 LANDSCAPE_LABELS = {
     "mountain",

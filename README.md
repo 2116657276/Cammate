@@ -87,7 +87,7 @@ export SCENE_YUNET_TOP_K=256
 ## AI Provider 环境变量
 
 ```bash
-# 拍前分析（默认 external）
+# 拍前分析（构图建议，默认 external）
 export AI_PROVIDER=external
 # export ARK_API_KEY="<your_key>"
 # export ARK_API_URL="https://ark.cn-beijing.volces.com/api/v3/responses"
@@ -99,10 +99,17 @@ export AI_PROVIDER=external
 # export ARK_STRICT_CLOUD="true"         # 默认 true，禁用本地建议兜底
 # export ARK_RATE_LIMIT_COOLDOWN_SEC="12"
 
-# 修图（当前客户端按钮仅提示“暂未开放”）
-# 后端接口仍保留：
+# 修图（与构图建议 API 完全隔离）
 # export ARK_IMAGE_API_URL="https://ark.cn-beijing.volces.com/api/v3/images/generations"
-# export ARK_IMAGE_MODEL="doubao-seedream-3-0-t2i-250415"
+# export ARK_IMAGE_API_KEY="<retouch_key>"   # 必填，不会回退到 ARK_API_KEY
+# export ARK_IMAGE_MODEL="doubao-seedream-5-0-260128"
+# export ARK_IMAGE_SIZE="2K"
+# export ARK_IMAGE_RESPONSE_FORMAT="url"     # url / b64_json
+# export ARK_IMAGE_SEQUENTIAL="disabled"     # enabled / disabled
+# export ARK_IMAGE_WATERMARK="true"
+# export ARK_IMAGE_STREAM="false"
+# export ARK_IMAGE_MAX_INPUT_SIDE="2048"     # 输入图长边超过该值会先缩放
+# export ARK_IMAGE_JPEG_QUALITY="94"
 ```
 
 说明：服务端会按顺序读取 `py/.env.local`、`py/.env`，仅在进程环境缺失时填充变量。
@@ -130,7 +137,8 @@ export AI_PROVIDER=external
 - 确认 `ultralytics` 依赖已安装成功（`pip show ultralytics`）
 
 3. 修图失败
-- 当前客户端为“暂未开放”提示，不触发云端修图
+- 确认 `ARK_IMAGE_API_KEY` 已配置（不会回退到 `ARK_API_KEY`）
+- 确认 `ARK_IMAGE_API_URL`、`ARK_IMAGE_MODEL` 与账号权限匹配
 
 4. 日志查看
 - 服务端日志默认输出到控制台 + `py/logs/server.log`（自动轮转）

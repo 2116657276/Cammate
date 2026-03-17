@@ -1,6 +1,7 @@
 package com.liveaicapture.mvp.network
 
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -15,7 +16,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class RetouchApiClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder().build(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(95, TimeUnit.SECONDS)
+        .writeTimeout(95, TimeUnit.SECONDS)
+        .callTimeout(100, TimeUnit.SECONDS)
+        .build(),
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val requestMediaType = "application/json; charset=utf-8".toMediaType()
@@ -27,6 +33,7 @@ class RetouchApiClient(
         preset: String,
         strength: Float,
         sceneHint: String,
+        customPrompt: String? = null,
     ): RetouchResult = withContext(Dispatchers.IO) {
         val requestId = newRequestId("retouch")
         val payload = buildJsonObject {
@@ -34,6 +41,9 @@ class RetouchApiClient(
             put("preset", JsonPrimitive(preset))
             put("strength", JsonPrimitive(strength))
             put("scene_hint", JsonPrimitive(sceneHint))
+            customPrompt?.trim()?.takeIf { it.isNotBlank() }?.let {
+                put("custom_prompt", JsonPrimitive(it))
+            }
         }.toString()
 
         val request = Request.Builder()
@@ -54,6 +64,7 @@ class RetouchApiClient(
                 imageBase64 = obj["retouched_image_base64"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 provider = obj["provider"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 model = obj["model"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                requestId = responseRequestId,
             )
         }
     }
@@ -63,4 +74,5 @@ data class RetouchResult(
     val imageBase64: String,
     val provider: String,
     val model: String,
+    val requestId: String,
 )
