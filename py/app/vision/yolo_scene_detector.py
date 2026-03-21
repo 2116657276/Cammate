@@ -20,7 +20,7 @@ class YoloSceneDetector:
         self._scene_margin = self._env_float("SCENE_YOLO_SCENE_MARGIN", 0.14, 0.04, 0.45)
         self._portrait_min_box_conf = self._env_float("SCENE_YOLO_PORTRAIT_MIN_CONF", 0.46, 0.20, 0.95)
         self._food_min_area = self._env_float("SCENE_FOOD_MIN_AREA", 0.028, 0.005, 0.30)
-        self._food_scene_min_strength = self._env_float("SCENE_FOOD_MIN_STRENGTH", 0.56, 0.30, 0.95)
+        self._food_scene_min_strength = self._env_float("SCENE_FOOD_MIN_STRENGTH", 0.52, 0.30, 0.95)
 
         project_root = Path(__file__).resolve().parents[2]
         default_model = project_root / "models" / "scene_yolo11n.pt"
@@ -238,9 +238,9 @@ class YoloSceneDetector:
             self._normalize_strength(person_best, low=0.32, high=1.16) * 0.42
             + self._normalize_strength(closeup_person, low=0.36, high=1.26) * 0.58
         )
-        food_score = self._normalize_strength(food_best, low=0.30, high=1.02)
+        food_score = self._normalize_strength(food_best, low=0.24, high=0.96)
         general_score = (
-            0.34
+            0.30
             + self._normalize_strength(general_best, low=0.22, high=0.98) * 0.30
             + self._normalize_strength(pet_best, low=0.26, high=1.02) * 0.24
         )
@@ -248,12 +248,14 @@ class YoloSceneDetector:
         if person_boxes:
             portrait_score += 0.08
         if food_boxes:
+            food_score += 0.12
+        if label_food_conf >= 0.52:
             food_score += 0.08
 
         # Mixed scenes are usually ambiguous (for example food + pet/person in one frame),
         # so general gets an ambiguity bonus to reduce scene flapping.
         if person_boxes and food_boxes:
-            general_score += 0.10
+            general_score += 0.06
             if abs(portrait_score - food_score) < 0.12:
                 general_score += 0.06
 
@@ -278,9 +280,10 @@ class YoloSceneDetector:
         margin = max(0.0, top_score - second_score)
 
         # If top2 are too close, fallback to general rather than forcing a wrong specific scene.
-        if top_scene != "general" and margin < 0.10:
+        scene_margin_gate = 0.07 if top_scene == "food" else 0.10
+        if top_scene != "general" and margin < scene_margin_gate:
             top_scene = "general"
-            top_score = max(scores["general"], 0.44 + (0.10 - margin) * 0.45)
+            top_score = max(scores["general"], 0.44 + (scene_margin_gate - margin) * 0.45)
             second_score = max(scores["portrait"], scores["food"])
             margin = max(0.0, top_score - second_score)
 
@@ -407,8 +410,8 @@ class YoloSceneDetector:
         if box.area_norm >= self._food_min_area:
             return True
         if box.label in DRINK_CONTAINER_LABELS:
-            return box.confidence >= 0.62
-        return box.confidence >= 0.70
+            return box.confidence >= 0.55
+        return box.confidence >= 0.66
 
     def _extract_box_candidates(
         self,

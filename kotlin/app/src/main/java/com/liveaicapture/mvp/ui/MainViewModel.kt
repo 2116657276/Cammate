@@ -54,11 +54,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "CamMate"
         private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
-        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 2_000L
-        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
-        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 900L
+        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
+        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_620L
+        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 810L
         private const val SCENE_SWITCH_BOOST_WINDOW_MS = 2_200L
-        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 900L
+        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 810L
         private const val GENERAL_SUBJECT_MIN_CONFIDENCE = 0.54f
         private const val GENERAL_SUBJECT_MIN_AREA = 0.022f
         private const val GLOBAL_SUBJECT_MIN_AREA = 0.010f
