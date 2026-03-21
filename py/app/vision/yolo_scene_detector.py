@@ -281,8 +281,6 @@ class YoloSceneDetector:
                     mode="food",
                 )
             return SceneResult(scene="general", confidence=max(0.56, scene_result.confidence * 0.80), mode="general")
-        if capture_mode == "general" and scene_result.scene == "portrait" and scene_result.confidence < 0.84:
-            return SceneResult(scene="general", confidence=max(0.60, scene_result.confidence * 0.82), mode="general")
         if capture_mode == "general" and scene_result.scene == "landscape":
             return SceneResult(scene="general", confidence=scene_result.confidence, mode="general")
         return scene_result

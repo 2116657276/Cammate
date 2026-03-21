@@ -31,11 +31,17 @@ class HybridSceneDetector:
         elif mode == "general":
             scene_result.mode = "general"
 
+        face_boxes: list[BoxCandidate] | None = None
+        if mode in {"auto", "general"}:
+            face_boxes = self._yunet.detect_faces(image_bytes)
+            scene_result = self._apply_face_priority(scene_result, mode, face_boxes)
+
         target = self._select_subject_target(
             image_bytes=image_bytes,
             scene_result=scene_result,
             capture_mode=mode,
             yolo_boxes=yolo_boxes,
+            face_boxes=face_boxes,
         )
         if target is not None:
             scene_result.bbox_norm = target.bbox_norm
@@ -51,13 +57,14 @@ class HybridSceneDetector:
         scene_result: SceneResult,
         capture_mode: str,
         yolo_boxes: list[BoxCandidate],
+        face_boxes: list[BoxCandidate] | None = None,
     ) -> BoxCandidate | None:
         use_portrait_target = capture_mode == "portrait" or scene_result.scene == "portrait"
         use_food_target = capture_mode == "food" or scene_result.scene == "food"
 
         if use_portrait_target:
-            face_boxes = self._yunet.detect_faces(image_bytes)
-            best_face = self._pick_best_face(face_boxes)
+            portrait_faces = face_boxes if face_boxes is not None else self._yunet.detect_faces(image_bytes)
+            best_face = self._pick_best_face(portrait_faces)
             if best_face is not None:
                 return best_face
 
@@ -84,6 +91,36 @@ class HybridSceneDetector:
                 return self._yolo.refine_upper_body_box(scene_target)
             return self._yolo.shrink_oversized_box(scene_target)
         return None
+
+    def _apply_face_priority(
+        self,
+        scene_result: SceneResult,
+        capture_mode: str,
+        face_boxes: list[BoxCandidate],
+    ) -> SceneResult:
+        if capture_mode not in {"auto", "general"}:
+            return scene_result
+        best_face = self._pick_best_face(face_boxes)
+        if best_face is None:
+            return scene_result
+        # Keep portrait promotion conservative to avoid random false positive face boxes.
+        if best_face.confidence < 0.78 or best_face.area_norm < 0.012:
+            return scene_result
+
+        boosted_confidence = min(
+            0.93,
+            max(
+                scene_result.confidence,
+                0.64 + best_face.confidence * 0.22 + min(0.10, best_face.area_norm * 0.35),
+            ),
+        )
+        return SceneResult(
+            scene="portrait",
+            confidence=boosted_confidence,
+            mode="portrait",
+            bbox_norm=scene_result.bbox_norm,
+            center_norm=scene_result.center_norm,
+        )
 
     def _pick_best_face(self, faces: list[BoxCandidate]) -> BoxCandidate | None:
         if not faces:

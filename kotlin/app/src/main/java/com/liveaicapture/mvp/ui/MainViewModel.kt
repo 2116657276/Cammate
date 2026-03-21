@@ -53,11 +53,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "CamMate"
         private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
-        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 12_000L
-        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 2_500L
-        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
-        private const val SCENE_SWITCH_BOOST_WINDOW_MS = 2_000L
-        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 1_200L
+        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 2_000L
+        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
+        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 900L
+        private const val SCENE_SWITCH_BOOST_WINDOW_MS = 3_000L
+        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 700L
     }
 
     private val settingsRepository = SettingsRepository(application)
@@ -105,7 +105,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastSuccessfulTipText: String = ""
     private val recentSuccessfulTips = ArrayDeque<String>()
     private var nextAnalyzeAllowedAtMs = 0L
-    private var sceneAutoSwitchUsed = false
     private var sceneAutoSwitchLockedByManual = false
     private var sceneFastDetectUntilMs = 0L
 
@@ -289,7 +288,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState()
         lastSuccessfulTipText = ""
         recentSuccessfulTips.clear()
-        sceneAutoSwitchUsed = false
         sceneAutoSwitchLockedByManual = false
         _uiState.update {
             it.copy(
@@ -318,7 +316,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onCameraSessionEntered() {
-        sceneAutoSwitchUsed = false
         sceneAutoSwitchLockedByManual = false
         lastSceneClassifyAt = 0L
         sceneFastDetectUntilMs = 0L
@@ -664,19 +661,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val currentConfidence = it.sceneConfidence.coerceIn(0f, 1f)
                     val sceneChanged = event.scene != currentScene
                     val autoModeEnabled = it.settings.captureMode == CaptureMode.AUTO
-                    val confidenceAllowsSwitch = (
-                        incomingConfidence >= 0.82f ||
-                            (currentConfidence <= 0.35f && incomingConfidence >= 0.62f)
-                        )
+                    val confidenceGate = max(0.62f, currentConfidence + 0.08f)
+                    val confidenceAllowsSwitch = incomingConfidence >= confidenceGate
+                    val strongSwitch = incomingConfidence >= 0.78f
                     val canAutoSwitchNow = (
                         autoModeEnabled &&
-                            !sceneAutoSwitchLockedByManual &&
-                            !sceneAutoSwitchUsed
+                            !sceneAutoSwitchLockedByManual
                         )
                     val shouldSwitchScene = (
                         event.scene != currentScene &&
                             canAutoSwitchNow &&
-                            confidenceAllowsSwitch
+                            (
+                                strongSwitch ||
+                                    confidenceAllowsSwitch ||
+                                    currentConfidence <= 0.35f
+                                )
                         )
 
                     if (sceneChanged) {
@@ -691,7 +690,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             sceneConfidence = incomingConfidence,
                         )
                     } else if (shouldSwitchScene) {
-                        sceneAutoSwitchUsed = true
                         it.copy(
                             detectedScene = event.scene,
                             sceneConfidence = incomingConfidence,
@@ -1181,7 +1179,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateCaptureMode(mode: CaptureMode) {
-        sceneAutoSwitchLockedByManual = true
+        sceneAutoSwitchLockedByManual = mode != CaptureMode.AUTO
         sceneFastDetectUntilMs = max(sceneFastDetectUntilMs, System.currentTimeMillis() + SCENE_SWITCH_BOOST_WINDOW_MS)
         lastSceneClassifyAt = 0L
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }

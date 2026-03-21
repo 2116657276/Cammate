@@ -80,6 +80,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material.icons.Icons
@@ -186,6 +187,32 @@ fun CameraScreen(
         camera.cameraControl.setZoomRatio(safeZoom)
     }
 
+    DisposableEffect(activeCamera, lifecycleOwner) {
+        val camera = activeCamera
+        if (camera == null) {
+            onDispose { }
+        } else {
+            val zoomLiveData = camera.cameraInfo.zoomState
+            val observer = Observer<androidx.camera.core.ZoomState> { zoomState ->
+                val hwMin = zoomState.minZoomRatio
+                val hwMax = zoomState.maxZoomRatio
+                val uiMin = max(0.5f, hwMin)
+                val rawUiMax = min(5f, hwMax)
+                val uiMax = if (rawUiMax < uiMin) uiMin else rawUiMax
+                minZoomRatio = uiMin
+                maxZoomRatio = uiMax
+                val safeZoom = zoomRatio.coerceIn(uiMin, uiMax)
+                if (safeZoom != zoomRatio) {
+                    zoomRatio = safeZoom
+                }
+            }
+            zoomLiveData.observe(lifecycleOwner, observer)
+            onDispose {
+                zoomLiveData.removeObserver(observer)
+            }
+        }
+    }
+
     LaunchedEffect(activeCamera, exposureIndex, minExposureIndex, maxExposureIndex) {
         val camera = activeCamera ?: return@LaunchedEffect
         if (maxExposureIndex <= minExposureIndex) return@LaunchedEffect
@@ -236,15 +263,6 @@ fun CameraScreen(
                                 onImageCaptureReady = { capture -> imageCapture = capture },
                                 onCameraReady = { camera ->
                                     activeCamera = camera
-                                    val zoomState = camera.cameraInfo.zoomState.value
-                                    val hwMin = zoomState?.minZoomRatio ?: 1f
-                                    val hwMax = zoomState?.maxZoomRatio ?: 6f
-                                    val uiMin = max(0.5f, hwMin)
-                                    val rawUiMax = min(5f, hwMax)
-                                    val uiMax = if (rawUiMax < uiMin) uiMin else rawUiMax
-                                    minZoomRatio = uiMin
-                                    maxZoomRatio = uiMax
-                                    zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
 
                                     hasFlashUnit = camera.cameraInfo.hasFlashUnit()
                                     if (!hasFlashUnit || lens == CameraLens.FRONT) {
@@ -332,7 +350,17 @@ fun CameraScreen(
                     TopSettingIconButton(Icons.Outlined.ZoomIn, "焦距") { activeSheet = CameraSettingSheet.ZOOM }
                     TopSettingIconButton(Icons.Outlined.Exposure, "曝光") { activeSheet = CameraSettingSheet.EXPOSURE }
                     TopSettingIconButton(Icons.Outlined.Timer, "倒计时") { activeSheet = CameraSettingSheet.TIMER }
-                    TopSettingIconButton(Icons.Outlined.Cameraswitch, "镜头") { activeSheet = CameraSettingSheet.LENS }
+                    TopSettingIconButton(
+                        Icons.Outlined.Cameraswitch,
+                        if (lens == CameraLens.BACK) "切换前置" else "切换后置",
+                    ) {
+                        val nextLens = if (lens == CameraLens.BACK) CameraLens.FRONT else CameraLens.BACK
+                        lens = nextLens
+                        if (nextLens == CameraLens.FRONT) {
+                            flash = FlashMode.OFF
+                            torchEnabled = false
+                        }
+                    }
                 }
             }
         }
@@ -541,7 +569,6 @@ fun CameraScreen(
                     CameraSettingSheet.ZOOM -> "焦距"
                     CameraSettingSheet.EXPOSURE -> "曝光"
                     CameraSettingSheet.TIMER -> "倒计时"
-                    CameraSettingSheet.LENS -> "镜头"
                 },
             )
 
@@ -674,31 +701,6 @@ fun CameraScreen(
                     }
                 }
 
-                CameraSettingSheet.LENS -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        FilterChip(
-                            selected = lens == CameraLens.BACK,
-                            onClick = { lens = CameraLens.BACK },
-                            modifier = Modifier.padding(horizontal = 4.dp),
-                            label = { Text("后置") },
-                        )
-                        FilterChip(
-                            selected = lens == CameraLens.FRONT,
-                            onClick = {
-                                lens = CameraLens.FRONT
-                                flash = FlashMode.OFF
-                                torchEnabled = false
-                            },
-                            modifier = Modifier.padding(horizontal = 4.dp),
-                            label = { Text("前置") },
-                        )
-                    }
-                }
             }
 
             androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(bottom = 24.dp))
@@ -805,7 +807,6 @@ private enum class CameraSettingSheet {
     ZOOM,
     EXPOSURE,
     TIMER,
-    LENS,
 }
 
 @Composable

@@ -300,12 +300,6 @@ class DoubaoImageEditProvider:
             )
 
         preset_key = self._normalize_preset(preset)
-        if preset_key == "portrait_beauty" and scene_text != "portrait":
-            logger.info(
-                "retouch.provider.preset_downgrade from=portrait_beauty to=color_grade scene=%s",
-                scene_text,
-            )
-            preset_key = "color_grade"
         preset_map = {
             "bg_cleanup": "清理和弱化杂乱背景元素，主体保持清晰自然，不改变主体身份与姿态。",
             "portrait_beauty": "优化人像肤色与层次，保持五官真实，适度提亮主体并保留皮肤质感。",
