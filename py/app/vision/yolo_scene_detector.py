@@ -19,6 +19,8 @@ class YoloSceneDetector:
         self._imgsz = self._env_int("SCENE_YOLO_IMGSZ", 640, 320, 1280)
         self._scene_margin = self._env_float("SCENE_YOLO_SCENE_MARGIN", 0.14, 0.04, 0.45)
         self._portrait_min_box_conf = self._env_float("SCENE_YOLO_PORTRAIT_MIN_CONF", 0.46, 0.20, 0.95)
+        self._food_min_area = self._env_float("SCENE_FOOD_MIN_AREA", 0.028, 0.005, 0.30)
+        self._food_scene_min_strength = self._env_float("SCENE_FOOD_MIN_STRENGTH", 0.56, 0.30, 0.95)
 
         project_root = Path(__file__).resolve().parents[2]
         default_model = project_root / "models" / "scene_yolo11n.pt"
@@ -213,49 +215,78 @@ class YoloSceneDetector:
         labels_with_conf: list[tuple[str, float]],
         boxes: list[BoxCandidate],
     ) -> SceneResult:
+        if not labels_with_conf and not boxes:
+            return SceneResult(scene="general", confidence=0.25, mode="general")
+
         person_boxes = [box for box in boxes if box.label in PERSON_LABELS]
-        food_boxes = [box for box in boxes if box.label in FOOD_LABELS]
-
-        # User-defined strategy precedence:
-        # 1) person + food => portrait
-        # 2) portrait close-up => portrait
-        # 3) food only => food
-        # 4) no person or far/full-body person => general
-        closeup_person = self._best_closeup_person_strength(person_boxes)
+        food_boxes = [box for box in boxes if self._is_food_candidate(box)]
         person_best = self._best_person_strength(person_boxes)
+        closeup_person = self._best_closeup_person_strength(person_boxes)
         food_best = self._best_food_strength(food_boxes)
+        pet_best = self._best_pet_strength(boxes)
+        general_best = self._best_general_strength(boxes)
 
-        if person_boxes and food_boxes:
-            conf = min(0.95, 0.64 + min(0.24, closeup_person * 0.16 + person_best * 0.12 + food_best * 0.10))
-            return SceneResult(scene="portrait", confidence=conf, mode="portrait")
+        person_label_conf = max((float(conf) for label, conf in labels_with_conf if label in PERSON_LABELS), default=0.0)
+        food_label_conf = max((float(conf) for label, conf in labels_with_conf if label in FOOD_LABELS), default=0.0)
+        drink_label_conf = max(
+            (float(conf) for label, conf in labels_with_conf if label in DRINK_CONTAINER_LABELS),
+            default=0.0,
+        )
+        label_food_conf = max(food_label_conf, drink_label_conf)
+
+        portrait_score = (
+            self._normalize_strength(person_best, low=0.32, high=1.16) * 0.42
+            + self._normalize_strength(closeup_person, low=0.36, high=1.26) * 0.58
+        )
+        food_score = self._normalize_strength(food_best, low=0.30, high=1.02)
+        general_score = (
+            0.34
+            + self._normalize_strength(general_best, low=0.22, high=0.98) * 0.30
+            + self._normalize_strength(pet_best, low=0.26, high=1.02) * 0.24
+        )
 
         if person_boxes:
-            if closeup_person >= max(0.30, self._portrait_min_box_conf - 0.16):
-                conf = min(0.94, 0.58 + min(0.30, closeup_person * 0.26))
-                return SceneResult(scene="portrait", confidence=conf, mode="portrait")
-            general_conf = min(0.84, 0.56 + min(0.22, person_best * 0.22))
-            return SceneResult(scene="general", confidence=general_conf, mode="general")
-
+            portrait_score += 0.08
         if food_boxes:
-            conf = min(0.90, 0.56 + min(0.30, food_best * 0.30))
-            return SceneResult(scene="food", confidence=conf, mode="food")
+            food_score += 0.08
 
-        has_person_label = any(label in PERSON_LABELS and float(conf) >= 0.34 for label, conf in labels_with_conf)
-        has_food_label = any(label in FOOD_LABELS and float(conf) >= 0.24 for label, conf in labels_with_conf)
-        has_drink_label = any(label in DRINK_CONTAINER_LABELS and float(conf) >= 0.18 for label, conf in labels_with_conf)
-        if has_person_label and (has_food_label or has_drink_label):
-            return SceneResult(scene="portrait", confidence=0.58, mode="portrait")
-        if has_person_label:
-            return SceneResult(scene="general", confidence=0.56, mode="general")
-        if has_food_label or has_drink_label:
-            return SceneResult(scene="food", confidence=0.58, mode="food")
+        # Mixed scenes are usually ambiguous (for example food + pet/person in one frame),
+        # so general gets an ambiguity bonus to reduce scene flapping.
+        if person_boxes and food_boxes:
+            general_score += 0.10
+            if abs(portrait_score - food_score) < 0.12:
+                general_score += 0.06
 
-        max_conf = max((max(0.0, min(1.0, float(conf))) for _, conf in labels_with_conf), default=0.25)
-        return SceneResult(
-            scene="general",
-            confidence=min(0.82, 0.36 + max_conf * 0.36),
-            mode="general",
+        # Label-only evidence still contributes when boxes are weak.
+        portrait_score = max(
+            portrait_score,
+            self._normalize_strength(person_label_conf, low=0.30, high=0.82) * 0.62,
         )
+        food_score = max(
+            food_score,
+            self._normalize_strength(label_food_conf, low=0.34, high=0.86) * 0.62,
+        )
+
+        scores = {
+            "portrait": max(0.0, min(1.0, portrait_score)),
+            "food": max(0.0, min(1.0, food_score)),
+            "general": max(0.0, min(1.0, general_score)),
+        }
+        ranking = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        top_scene, top_score = ranking[0]
+        second_score = ranking[1][1] if len(ranking) > 1 else 0.0
+        margin = max(0.0, top_score - second_score)
+
+        # If top2 are too close, fallback to general rather than forcing a wrong specific scene.
+        if top_scene != "general" and margin < 0.10:
+            top_scene = "general"
+            top_score = max(scores["general"], 0.44 + (0.10 - margin) * 0.45)
+            second_score = max(scores["portrait"], scores["food"])
+            margin = max(0.0, top_score - second_score)
+
+        confidence = min(0.95, max(0.50, 0.48 + top_score * 0.34 + margin * 0.28))
+        mode = top_scene if top_scene in {"portrait", "food", "general"} else "general"
+        return SceneResult(scene=top_scene, confidence=confidence, mode=mode)
 
     def _apply_capture_mode_bias(
         self,
@@ -290,8 +321,8 @@ class YoloSceneDetector:
             return scene_result
         if scene_hint == "landscape":
             scene_hint = "general"
-        if scene_hint == "food" and scene_result.scene == "general" and scene_result.confidence < 0.68:
-            return SceneResult(scene="food", confidence=0.58, mode="food")
+        if scene_hint == "food" and scene_result.scene == "general" and scene_result.confidence < 0.72:
+            return SceneResult(scene="food", confidence=max(0.60, scene_result.confidence), mode="food")
         if scene_hint == scene_result.scene:
             return scene_result
         if scene_result.confidence >= 0.56:
@@ -342,6 +373,42 @@ class YoloSceneDetector:
                 continue
             best = max(best, box.confidence + min(0.20, box.area_norm * 0.7))
         return best
+
+    def _best_pet_strength(self, boxes: list[BoxCandidate]) -> float:
+        best = 0.0
+        for box in boxes:
+            if box.label not in PET_LABELS:
+                continue
+            center_bonus = self._center_bonus(box) * 0.16
+            best = max(best, box.confidence + min(0.18, box.area_norm * 0.62) + center_bonus)
+        return best
+
+    def _best_general_strength(self, boxes: list[BoxCandidate]) -> float:
+        best = 0.0
+        for box in boxes:
+            if box.label in PERSON_LABELS or box.label in FOOD_LABELS:
+                continue
+            center_bonus = self._center_bonus(box) * 0.12
+            best = max(best, box.confidence + min(0.16, box.area_norm * 0.56) + center_bonus)
+        return best
+
+    def _center_bonus(self, box: BoxCandidate) -> float:
+        cx, cy = box.center_norm
+        return 1.0 - min(1.0, abs(cx - 0.5) + abs(cy - 0.5))
+
+    def _normalize_strength(self, value: float, low: float, high: float) -> float:
+        if high <= low:
+            return max(0.0, min(1.0, value))
+        return max(0.0, min(1.0, (value - low) / (high - low)))
+
+    def _is_food_candidate(self, box: BoxCandidate) -> bool:
+        if box.label not in FOOD_LABELS:
+            return False
+        if box.area_norm >= self._food_min_area:
+            return True
+        if box.label in DRINK_CONTAINER_LABELS:
+            return box.confidence >= 0.62
+        return box.confidence >= 0.70
 
     def _extract_box_candidates(
         self,

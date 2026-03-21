@@ -30,6 +30,7 @@ class SceneApiClient(
         bearerToken: String,
         imageBase64: String,
         rotationDegrees: Int,
+        lensFacing: String,
         captureMode: String,
         sceneHint: String,
     ): SceneDetectResult = withContext(Dispatchers.IO) {
@@ -40,6 +41,7 @@ class SceneApiClient(
                 "client_context",
                 buildJsonObject {
                     put("rotation_degrees", JsonPrimitive(rotationDegrees))
+                    put("lens_facing", JsonPrimitive(if (lensFacing == "front") "front" else "back"))
                     put("capture_mode", JsonPrimitive(captureMode))
                     put("scene_hint", JsonPrimitive(sceneHint))
                 },

@@ -259,7 +259,12 @@ fun CameraScreen(
                                 analysisExecutor = analysisExecutor,
                                 lens = lens,
                                 flashMode = flash,
-                                onAnalyze = { imageProxy -> viewModel.onFrame(imageProxy) },
+                                onAnalyze = { imageProxy ->
+                                    viewModel.onFrame(
+                                        imageProxy = imageProxy,
+                                        lensFacing = if (lens == CameraLens.FRONT) "front" else "back",
+                                    )
+                                },
                                 onImageCaptureReady = { capture -> imageCapture = capture },
                                 onCameraReady = { camera ->
                                     activeCamera = camera

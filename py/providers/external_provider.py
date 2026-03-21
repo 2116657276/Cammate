@@ -250,7 +250,7 @@ class ExternalProvider(VisionProvider):
             '{"strategy":{"grid":"thirds|center|none","target_point_norm":[0~1,0~1]},'
             '"ui":{"text":"<=24字中文建议","level":"info|warn"},'
             '"param":{"exposure_compensation":-2..2}}\n'
-            "若无法输出 JSON，退化为一条<=22字中文建议（纯文本）。\n"
+            "若无法输出 JSON，退化为一条<=24字中文建议（纯文本）。\n"
             "约束：\n"
             "1) 只给一条建议；\n"
             "2) thirds/center/none 可自由选择，不要固定三分线；\n"
@@ -477,19 +477,15 @@ class ExternalProvider(VisionProvider):
         cleaned = filtered
 
         tip = ""
-        for i, line in enumerate(cleaned):
-            if "鏋勫浘寤鸿" in line and i + 1 < len(cleaned):
-                tip = cleaned[i + 1]
-                break
         for line in cleaned:
-            if any(k in line for k in ("寤鸿", "瀵归綈", "鏀惧湪", "闈犺繎", "鐣欑櫧", "鏋勫浘", "姘村钩", "绋充綇", "鏇濆厜")):
+            if any(k in line for k in ("建议", "对齐", "放在", "靠近", "留白", "构图", "水平", "稳住", "曝光", "主体")):
                 tip = line
                 break
         if not tip:
             tip = cleaned[0]
         if self._looks_like_internal_reasoning(tip):
             return None
-        tip = tip[:48]
+        tip = tip[:24]
 
         capture_mode = str(client_context.get("capture_mode") or "auto").strip().lower()
         grid = self._default_grid(detected_scene, capture_mode)

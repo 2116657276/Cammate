@@ -34,7 +34,12 @@ class HybridSceneDetector:
         face_boxes: list[BoxCandidate] | None = None
         if mode in {"auto", "general"}:
             face_boxes = self._yunet.detect_faces(image_bytes)
-            scene_result = self._apply_face_priority(scene_result, mode, face_boxes)
+            scene_result = self._apply_face_priority(
+                scene_result=scene_result,
+                capture_mode=mode,
+                face_boxes=face_boxes,
+                yolo_boxes=yolo_boxes,
+            )
 
         target = self._select_subject_target(
             image_bytes=image_bytes,
@@ -97,14 +102,18 @@ class HybridSceneDetector:
         scene_result: SceneResult,
         capture_mode: str,
         face_boxes: list[BoxCandidate],
+        yolo_boxes: list[BoxCandidate],
     ) -> SceneResult:
         if capture_mode not in {"auto", "general"}:
             return scene_result
         best_face = self._pick_best_face(face_boxes)
         if best_face is None:
             return scene_result
+        has_person_evidence = any(box.label in PERSON_LABELS and box.confidence >= 0.34 for box in yolo_boxes)
+        if not has_person_evidence and scene_result.scene != "portrait":
+            return scene_result
         # Keep portrait promotion conservative to avoid random false positive face boxes.
-        if best_face.confidence < 0.78 or best_face.area_norm < 0.012:
+        if best_face.confidence < 0.76 or best_face.area_norm < 0.010:
             return scene_result
 
         boosted_confidence = min(

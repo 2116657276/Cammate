@@ -6,6 +6,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class AppLogger(private val context: Context) {
     private val lock = Any()
@@ -14,15 +16,20 @@ class AppLogger(private val context: Context) {
     private val logDir: File by lazy { File(context.filesDir, "logs").apply { mkdirs() } }
     private val logFile: File by lazy { File(logDir, "client.log") }
     private val backupFile: File by lazy { File(logDir, "client.log.1") }
+    private val writerExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "CamMate-LogWriter").apply { isDaemon = true }
+        }
+    }
 
     fun i(tag: String, message: String) {
         Log.i(tag, message)
-        append("INFO", tag, message, null)
+        enqueue("INFO", tag, message, null)
     }
 
     fun w(tag: String, message: String) {
         Log.w(tag, message)
-        append("WARN", tag, message, null)
+        enqueue("WARN", tag, message, null)
     }
 
     fun e(tag: String, message: String, throwable: Throwable? = null) {
@@ -31,7 +38,17 @@ class AppLogger(private val context: Context) {
         } else {
             Log.e(tag, message)
         }
-        append("ERROR", tag, message, throwable)
+        enqueue("ERROR", tag, message, throwable)
+    }
+
+    private fun enqueue(level: String, tag: String, message: String, throwable: Throwable?) {
+        try {
+            writerExecutor.execute {
+                append(level, tag, message, throwable)
+            }
+        } catch (_: Exception) {
+            // If background writer fails, skip file write to avoid affecting foreground flow.
+        }
     }
 
     private fun append(level: String, tag: String, message: String, throwable: Throwable?) {
@@ -84,4 +101,3 @@ object AppLog {
         }
     }
 }
-

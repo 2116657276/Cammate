@@ -30,6 +30,7 @@ import com.liveaicapture.mvp.network.AuthApiClient
 import com.liveaicapture.mvp.network.FeedbackApiClient
 import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
+import com.liveaicapture.mvp.network.SceneDetectResult
 import com.liveaicapture.mvp.tts.TtsSpeaker
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -56,8 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val STABLE_SCENE_DETECT_INTERVAL_MS = 2_000L
         private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
         private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 900L
-        private const val SCENE_SWITCH_BOOST_WINDOW_MS = 3_000L
-        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 700L
+        private const val SCENE_SWITCH_BOOST_WINDOW_MS = 2_200L
+        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 900L
+        private const val GENERAL_SUBJECT_MIN_CONFIDENCE = 0.54f
+        private const val GENERAL_SUBJECT_MIN_AREA = 0.022f
+        private const val GLOBAL_SUBJECT_MIN_AREA = 0.010f
     }
 
     private val settingsRepository = SettingsRepository(application)
@@ -67,7 +71,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val authApiClient = AuthApiClient()
     private val feedbackApiClient = FeedbackApiClient()
     private val retouchApiClient = RetouchApiClient()
-    private val ttsSpeaker = TtsSpeaker(application)
+    private var ttsSpeaker: TtsSpeaker? = null
     private val appLogger = AppLog.get(application)
 
     private val _uiState = MutableStateFlow(CameraUiState())
@@ -87,6 +91,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var sceneDetectInFlight = false
     private var currentAnalyzeJob: Job? = null
     private var currentExposureCompensation = 0
+    private var latestLensFacing = "back"
 
     private val frameLock = Any()
     private var latestFrameJpeg: ByteArray? = null
@@ -107,6 +112,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var nextAnalyzeAllowedAtMs = 0L
     private var sceneAutoSwitchLockedByManual = false
     private var sceneFastDetectUntilMs = 0L
+    private var pendingSceneSwitch: SceneType? = null
+    private var pendingSceneSwitchVotes = 0
 
     private var bearerToken: String = ""
 
@@ -289,6 +296,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastSuccessfulTipText = ""
         recentSuccessfulTips.clear()
         sceneAutoSwitchLockedByManual = false
+        pendingSceneSwitch = null
+        pendingSceneSwitchVotes = 0
         _uiState.update {
             it.copy(
                 aiEnabled = true,
@@ -319,6 +328,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sceneAutoSwitchLockedByManual = false
         lastSceneClassifyAt = 0L
         sceneFastDetectUntilMs = 0L
+        pendingSceneSwitch = null
+        pendingSceneSwitchVotes = 0
         _uiState.update { it.copy(showPostCaptureChoice = false) }
     }
 
@@ -326,10 +337,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Session-scoped auto-switch flags are reset on next enter.
     }
 
-    fun onFrame(imageProxy: ImageProxy) {
+    fun onFrame(imageProxy: ImageProxy, lensFacing: String = "back") {
         val snapshot = _uiState.value
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val now = System.currentTimeMillis()
+        latestLensFacing = if (lensFacing == "front") "front" else "back"
 
         val frameAspectRatio = computeRotatedAspectRatio(
             width = imageProxy.width,
@@ -377,8 +389,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             baseClassifyInterval
         }
         val shouldClassify = now - lastSceneClassifyAt >= classifyInterval
+        val canClassifyNow = shouldClassify &&
+            !snapshot.analyzingTips &&
+            _authUiState.value.authenticated &&
+            bearerToken.isNotBlank() &&
+            !isSceneDetectBusy()
         val shouldRefreshAnalyzeFrame = isStable && (now - lastStableFrameAtMs >= 1200L)
-        val shouldEncodeFrame = shouldClassify || shouldRefreshAnalyzeFrame || latestFrameJpeg == null
+        val shouldEncodeFrame = canClassifyNow || shouldRefreshAnalyzeFrame || latestFrameJpeg == null
         if (!shouldEncodeFrame) {
             imageProxy.close()
             return
@@ -411,9 +428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        if (!shouldClassify) return
-        if (_uiState.value.analyzingTips) return
-        if (!_authUiState.value.authenticated || bearerToken.isBlank()) return
+        if (!canClassifyNow) return
         if (!tryAcquireSceneDetect()) return
         lastSceneClassifyAt = now
 
@@ -428,40 +443,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bearerToken = bearerToken,
                     imageBase64 = Base64.encodeToString(requestBytes, Base64.NO_WRAP),
                     rotationDegrees = rotationDegrees,
+                    lensFacing = latestLensFacing,
                     captureMode = mode.raw,
                     sceneHint = sceneHint,
                 )
-                applyEvent(
-                    AnalyzeEvent.Scene(
-                        scene = classified.scene,
-                        mode = CaptureMode.fromRaw(classified.mode),
-                        confidence = classified.confidence,
-                    ),
-                )
-                _uiState.update { state ->
-                    val blendedBox = blendRect(
-                        previous = state.overlay.bboxNorm,
-                        incoming = classified.bbox,
-                        alpha = 0.28f,
-                    )
-                    val blendedCenter = blendOffset(
-                        previous = state.overlay.subjectCenterNorm,
-                        incoming = classified.center,
-                        alpha = 0.20f,
-                    )
-                    val overlay = state.overlay.copy(
-                        bboxNorm = blendedBox ?: state.overlay.bboxNorm,
-                        subjectCenterNorm = blendedCenter ?: state.overlay.subjectCenterNorm,
-                    )
-                    state.copy(
-                        overlay = overlay,
-                        moveHintText = buildMoveHintText(
-                            bbox = overlay.bboxNorm,
-                            targetPoint = overlay.targetPointNorm,
-                            subjectCenter = overlay.subjectCenterNorm,
-                        ),
-                    )
-                }
+                applySceneDetectResult(classified)
                 _uiState.update { it.copy(sessionFrameCount = it.sessionFrameCount + 1) }
             } catch (e: Exception) {
                 logClientError(
@@ -594,7 +580,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bearerToken = bearerToken,
                 imageBase64 = imageBase64,
                 rotationDegrees = rotationDegrees,
-                lensFacing = "back",
+                lensFacing = latestLensFacing,
                 exposureCompensation = currentExposureCompensation,
                 captureMode = settings.captureMode.raw,
                 sceneHint = fallbackScene.raw,
@@ -678,7 +664,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                         )
 
-                    if (sceneChanged) {
+                    if (sceneChanged && (strongSwitch || confidenceAllowsSwitch)) {
                         sceneFastDetectUntilMs = max(
                             sceneFastDetectUntilMs,
                             System.currentTimeMillis() + SCENE_SWITCH_BOOST_WINDOW_MS,
@@ -774,7 +760,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         nextAnalyzeAllowedAtMs = max(nextAnalyzeAllowedAtMs, System.currentTimeMillis() + 10_000L)
                     }
                 }
-                ttsSpeaker.speak(normalizedTip, _uiState.value.settings.voiceEnabled)
+                if (_uiState.value.settings.voiceEnabled) {
+                    getOrCreateTtsSpeaker().speak(normalizedTip, enabled = true)
+                }
             }
 
             is AnalyzeEvent.Param -> {
@@ -810,6 +798,150 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (sceneDetectInFlight) return false
             sceneDetectInFlight = true
             return true
+        }
+    }
+
+    private fun applySceneDetectResult(classified: SceneDetectResult) {
+        val now = System.currentTimeMillis()
+        _uiState.update { state ->
+            val incomingScene = classified.scene
+            val incomingConfidence = classified.confidence.coerceIn(0f, 1f)
+            val decision = decideSceneForPreview(
+                state = state,
+                incomingScene = incomingScene,
+                incomingConfidence = incomingConfidence,
+            )
+            if (decision.switched) {
+                sceneFastDetectUntilMs = max(
+                    sceneFastDetectUntilMs,
+                    now + SCENE_SWITCH_BOOST_WINDOW_MS,
+                )
+            }
+
+            val sceneForSubject = if (decision.acceptIncomingOverlay) incomingScene else decision.scene
+            val confidenceForSubject = if (decision.acceptIncomingOverlay) incomingConfidence else decision.confidence
+            val suppressSubject = shouldSuppressSubjectOverlay(
+                scene = sceneForSubject,
+                sceneConfidence = confidenceForSubject,
+                bbox = classified.bbox,
+            )
+            val incomingBox = if (decision.acceptIncomingOverlay && !suppressSubject) classified.bbox else null
+            val incomingCenter = if (decision.acceptIncomingOverlay && !suppressSubject) classified.center else null
+            val blendedBox = blendRect(
+                previous = state.overlay.bboxNorm,
+                incoming = incomingBox,
+                alpha = 0.28f,
+            )
+            val blendedCenter = blendOffset(
+                previous = state.overlay.subjectCenterNorm,
+                incoming = incomingCenter,
+                alpha = 0.20f,
+            )
+            val nextBox = when {
+                incomingBox == null -> null
+                else -> blendedBox ?: state.overlay.bboxNorm
+            }
+            val nextCenter = when {
+                incomingCenter == null -> null
+                else -> blendedCenter ?: state.overlay.subjectCenterNorm
+            }
+            val nextOverlay = state.overlay.copy(
+                bboxNorm = nextBox,
+                subjectCenterNorm = nextCenter,
+            )
+            state.copy(
+                detectedScene = decision.scene,
+                sceneConfidence = decision.confidence,
+                overlay = nextOverlay,
+                moveHintText = buildMoveHintText(
+                    bbox = nextOverlay.bboxNorm,
+                    targetPoint = nextOverlay.targetPointNorm,
+                    subjectCenter = nextOverlay.subjectCenterNorm,
+                ),
+            )
+        }
+    }
+
+    private fun decideSceneForPreview(
+        state: CameraUiState,
+        incomingScene: SceneType,
+        incomingConfidence: Float,
+    ): SceneDecision {
+        val currentScene = state.detectedScene
+        val currentConfidence = state.sceneConfidence.coerceIn(0f, 1f)
+        val lockedScene = lockedSceneByCaptureMode(state.settings.captureMode)
+        if (lockedScene != null) {
+            pendingSceneSwitch = null
+            pendingSceneSwitchVotes = 0
+            return SceneDecision(
+                scene = lockedScene,
+                confidence = incomingConfidence,
+                acceptIncomingOverlay = true,
+                switched = lockedScene != currentScene,
+            )
+        }
+
+        if (incomingScene == currentScene) {
+            pendingSceneSwitch = null
+            pendingSceneSwitchVotes = 0
+            val mergedConfidence = if (currentConfidence <= 0f) {
+                incomingConfidence
+            } else {
+                (currentConfidence * 0.32f + incomingConfidence * 0.68f).coerceIn(0f, 1f)
+            }
+            return SceneDecision(
+                scene = currentScene,
+                confidence = mergedConfidence,
+                acceptIncomingOverlay = true,
+                switched = false,
+            )
+        }
+
+        val nearCurrent = incomingConfidence + 0.04f >= currentConfidence
+        pendingSceneSwitchVotes = if (pendingSceneSwitch == incomingScene && nearCurrent) {
+            pendingSceneSwitchVotes + 1
+        } else {
+            1
+        }
+        pendingSceneSwitch = incomingScene
+
+        val strongSwitch = incomingConfidence >= 0.72f
+        val weakCurrent = currentConfidence <= 0.46f && incomingConfidence >= 0.50f
+        val streakSwitch = pendingSceneSwitchVotes >= 2 && incomingConfidence >= 0.52f && nearCurrent
+        val shouldSwitch = strongSwitch || weakCurrent || streakSwitch
+
+        if (shouldSwitch) {
+            pendingSceneSwitch = null
+            pendingSceneSwitchVotes = 0
+            return SceneDecision(
+                scene = incomingScene,
+                confidence = incomingConfidence,
+                acceptIncomingOverlay = true,
+                switched = true,
+            )
+        }
+
+        val softenedConfidence = max(currentConfidence * 0.95f, incomingConfidence * 0.88f).coerceIn(0f, 1f)
+        return SceneDecision(
+            scene = currentScene,
+            confidence = softenedConfidence,
+            acceptIncomingOverlay = false,
+            switched = false,
+        )
+    }
+
+    private fun lockedSceneByCaptureMode(mode: CaptureMode): SceneType? {
+        return when (mode) {
+            CaptureMode.AUTO -> null
+            CaptureMode.PORTRAIT -> SceneType.PORTRAIT
+            CaptureMode.GENERAL -> SceneType.GENERAL
+            CaptureMode.FOOD -> SceneType.FOOD
+        }
+    }
+
+    private fun isSceneDetectBusy(): Boolean {
+        synchronized(requestGate) {
+            return sceneDetectInFlight
         }
     }
 
@@ -1108,6 +1240,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "string_too_short" in raw && "\"password\"" in raw -> "密码至少 6 位"
             "string_too_long" in raw && "\"nickname\"" in raw -> "昵称最多 32 个字符"
             "invalid credentials" in raw -> "账号或密码错误"
+            "timeout" in raw || "timed out" in raw -> "网络连接超时，请检查网络后重试"
+            "failed to connect" in raw || "unable to resolve host" in raw -> "无法连接服务器，请检查网络或服务地址"
             action == "login" -> "登录失败，请检查账号或网络后重试"
             else -> "注册失败，请检查信息后重试"
         }
@@ -1182,6 +1316,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sceneAutoSwitchLockedByManual = mode != CaptureMode.AUTO
         sceneFastDetectUntilMs = max(sceneFastDetectUntilMs, System.currentTimeMillis() + SCENE_SWITCH_BOOST_WINDOW_MS)
         lastSceneClassifyAt = 0L
+        pendingSceneSwitch = null
+        pendingSceneSwitchVotes = 0
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }
     }
 
@@ -1216,8 +1352,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         currentAnalyzeJob?.cancel()
-        ttsSpeaker.shutdown()
+        ttsSpeaker?.shutdown()
+        ttsSpeaker = null
         super.onCleared()
+    }
+
+    private fun getOrCreateTtsSpeaker(): TtsSpeaker {
+        val existing = ttsSpeaker
+        if (existing != null) return existing
+        return TtsSpeaker(getApplication()).also { ttsSpeaker = it }
     }
 
     private fun blendOffset(previous: Offset?, incoming: Offset?, alpha: Float): Offset? {
@@ -1241,6 +1384,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             bottom = (base.bottom + (incoming.bottom - base.bottom) * safe).coerceIn(0f, 1f),
         )
     }
+
+    private fun rectArea(rect: Rect?): Float {
+        if (rect == null) return 0f
+        val width = (rect.right - rect.left).coerceAtLeast(0f)
+        val height = (rect.bottom - rect.top).coerceAtLeast(0f)
+        return width * height
+    }
+
+    private fun shouldSuppressSubjectOverlay(
+        scene: SceneType,
+        sceneConfidence: Float,
+        bbox: Rect?,
+    ): Boolean {
+        val area = rectArea(bbox)
+        if (bbox == null) return true
+        if (area < GLOBAL_SUBJECT_MIN_AREA) return true
+        return scene == SceneType.GENERAL &&
+            sceneConfidence < GENERAL_SUBJECT_MIN_CONFIDENCE &&
+            area < GENERAL_SUBJECT_MIN_AREA
+    }
+
+    private data class SceneDecision(
+        val scene: SceneType,
+        val confidence: Float,
+        val acceptIncomingOverlay: Boolean,
+        val switched: Boolean,
+    )
 
     private fun buildMoveHintText(
         bbox: Rect?,

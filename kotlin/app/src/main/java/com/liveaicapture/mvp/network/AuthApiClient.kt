@@ -16,9 +16,15 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 class AuthApiClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder().build(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .build(),
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val requestMediaType = "application/json; charset=utf-8".toMediaType()

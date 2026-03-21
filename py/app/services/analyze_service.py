@@ -73,7 +73,7 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
             event["exposure_compensation"] = 0
     elif etype == "ui":
         text = str(event.get("text", "请微调构图。")).strip()
-        event["text"] = text[:64] if text else "请微调构图。"
+        event["text"] = text[:24] if text else "请微调构图。"
         if event.get("level") not in {"info", "warn"}:
             event["level"] = "info"
     return event
