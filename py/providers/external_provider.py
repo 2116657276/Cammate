@@ -787,46 +787,6 @@ class ExternalProvider(VisionProvider):
         move_tokens = ("鏀惧湪", "绉诲埌", "绉昏嚦", "闈犺繎", "灞呬腑", "涓夊垎", "浜ょ偣", "宸︾Щ", "鍙崇Щ", "涓婄Щ", "涓嬬Щ")
         return any(token in tip_text for token in move_tokens)
 
-    def _response_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "strategy": {
-                    "type": "object",
-                    "properties": {
-                        "grid": {"type": "string", "enum": ["thirds", "center", "none"]},
-                        "target_point_norm": {
-                            "type": "array",
-                            "items": {"type": "number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                        },
-                    },
-                    "required": ["grid", "target_point_norm"],
-                    "additionalProperties": False,
-                },
-                "ui": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "maxLength": 28},
-                        "level": {"type": "string", "enum": ["info", "warn"]},
-                    },
-                    "required": ["text", "level"],
-                    "additionalProperties": False,
-                },
-                "param": {
-                    "type": "object",
-                    "properties": {
-                        "exposure_compensation": {"type": "integer", "minimum": -2, "maximum": 2},
-                    },
-                    "required": ["exposure_compensation"],
-                    "additionalProperties": False,
-                },
-            },
-            "required": ["strategy", "ui", "param"],
-            "additionalProperties": False,
-        }
-
     def _extract_strategy_grid(self, events: list[dict[str, Any]]) -> str:
         for event in events:
             if event.get("type") == "strategy":
