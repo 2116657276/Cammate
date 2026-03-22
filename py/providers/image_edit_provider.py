@@ -41,6 +41,7 @@ class DoubaoImageEditProvider:
         self.stream = self._env_bool("ARK_IMAGE_STREAM", False)
         self.max_input_side = self._env_int("ARK_IMAGE_MAX_INPUT_SIDE", 2048, 1024, 4096)
         self.jpeg_quality = self._env_int("ARK_IMAGE_JPEG_QUALITY", 94, 70, 98)
+        self.portrait_strength_floor = self._env_float("ARK_IMAGE_PORTRAIT_MIN_STRENGTH", 0.48, 0.20, 0.80)
 
     async def retouch(
         self,
@@ -277,9 +278,14 @@ class DoubaoImageEditProvider:
         scene_hint: str | None,
         custom_prompt: str | None,
     ) -> str:
-        strength_pct = int(max(0.0, min(1.0, strength)) * 100)
+        strength_norm = max(0.0, min(1.0, strength))
         scene_text = (scene_hint or "general").strip().lower() or "general"
         custom_text = (custom_prompt or "").strip()
+        preset_key = self._normalize_preset(preset)
+        applied_strength = strength_norm
+        if not custom_text and preset_key == "portrait_beauty":
+            applied_strength = max(strength_norm, self.portrait_strength_floor)
+        strength_pct = int(applied_strength * 100)
         subject_lock = (
             "这是图像修图任务，不是文生图。"
             "必须严格基于输入原图做后期优化，保持原图主体种类、数量、位置、姿态与构图。"
@@ -299,10 +305,14 @@ class DoubaoImageEditProvider:
                 "输出仅为处理后的图片。"
             )
 
-        preset_key = self._normalize_preset(preset)
         preset_map = {
             "bg_cleanup": "清理和弱化杂乱背景元素，主体保持清晰自然，不改变主体身份与姿态。",
-            "portrait_beauty": "优化人像肤色与层次，保持五官真实，适度提亮主体并保留皮肤质感。",
+            "portrait_beauty": (
+                "以自然人像精修为目标，重点优化脸部观感："
+                "轻度改善肤质和肤色不均，优化眼周暗沉与法令纹观感，"
+                "增强眼睛与唇部细节清晰度，提升面部立体感与光泽；"
+                "保持五官比例、身份特征和真实皮肤纹理，严禁过度磨皮和网红脸。"
+            ),
             "color_grade": "进行电影感调色与层次增强，优化对比与色温，保持真实细节。",
         }
         preset_text = preset_map[preset_key]

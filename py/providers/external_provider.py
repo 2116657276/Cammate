@@ -9,6 +9,7 @@ import os
 import re
 import time
 from difflib import SequenceMatcher
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -40,7 +41,9 @@ class ExternalProvider(VisionProvider):
         self.api_key = os.getenv("ARK_API_KEY", os.getenv("EXTERNAL_VISION_API_KEY", ""))
         self.model = os.getenv("ARK_MODEL", os.getenv("EXTERNAL_VISION_MODEL", "doubao-seed-2-0-lite-260215"))
         self.timeout_sec = self._env_float("EXTERNAL_TIMEOUT_SEC", 13.2, 2.0, 20.0)
-        self.max_output_tokens = self._env_int("ARK_MAX_OUTPUT_TOKENS", 1200, 128, 3072)
+        # Keep analyze output concise to reduce cloud latency and timeout risk.
+        self.max_output_tokens = self._env_int("ARK_MAX_OUTPUT_TOKENS", 480, 128, 3072)
+        self.retry_max_output_tokens = self._env_int("ARK_RETRY_MAX_OUTPUT_TOKENS", 360, 128, 1024)
         # Slightly higher temperature for better variation while keeping guidance stable.
         self.temperature = self._env_float("ARK_TEMPERATURE", 0.33, 0.0, 1.0)
         self.reasoning_effort = self._env_choice(
@@ -53,8 +56,22 @@ class ExternalProvider(VisionProvider):
         # Default to strict cloud mode: do not silently fall back to local mock suggestions.
         self.strict_cloud = self._env_bool("ARK_STRICT_CLOUD", True)
         self.rate_limit_cooldown_sec = self._env_float("ARK_RATE_LIMIT_COOLDOWN_SEC", 12.0, 1.0, 120.0)
+        self.cloud_image_max_side = self._env_int("ARK_IMAGE_MAX_SIDE", 960, 640, 1536)
+        self.cloud_image_min_side = self._env_int("ARK_IMAGE_MIN_SIDE", 640, 480, self.cloud_image_max_side)
+        self.cloud_image_jpeg_quality = self._env_int("ARK_IMAGE_JPEG_QUALITY", 82, 60, 95)
+        self.dynamic_image_side = self._env_bool("ARK_DYNAMIC_IMAGE_SIDE", True)
+        self.slow_request_ms = self._env_int("ARK_SLOW_REQUEST_MS", 9800, 3000, 20000)
+        self.fast_request_ms = self._env_int("ARK_FAST_REQUEST_MS", 4300, 1000, 10000)
+        self.dynamic_side_step_down = self._env_int("ARK_DYNAMIC_SIDE_STEP_DOWN", 128, 16, 256)
+        self.dynamic_side_step_up = self._env_int("ARK_DYNAMIC_SIDE_STEP_UP", 64, 16, 256)
         self._rate_limited_until = 0.0
         self._consecutive_429 = 0
+        self._current_cloud_image_side = self.cloud_image_max_side
+        self._slow_streak = 0
+        self._fast_streak = 0
+        self._state_lock = Lock()
+        self._http_client_lock = Lock()
+        self._http_client: httpx.AsyncClient | None = None
         self._fallback = MockProvider()
 
     async def analyze(
@@ -63,6 +80,7 @@ class ExternalProvider(VisionProvider):
         detected_scene: str,
         client_context: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        req_id = str(client_context.get("request_id") or "-")
         if not self.api_key:
             if self.strict_cloud:
                 raise RuntimeError("ARK_API_KEY missing")
@@ -72,7 +90,17 @@ class ExternalProvider(VisionProvider):
             remaining = self._rate_limited_until - now
             raise RuntimeError(f"cloud rate limited cooldown active ({remaining:.1f}s)")
 
-        cloud_image_base64 = self._prepare_cloud_image_base64(image_base64)
+        cloud_image_base64, prep_meta = self._prepare_cloud_image_base64(image_base64)
+        logger.info(
+            "external.analyze.prepare req=%s side=%d resized=%s transcode=%s raw_bytes=%d upload_bytes=%d prep_ms=%d",
+            req_id,
+            prep_meta["target_side"],
+            prep_meta["resized"],
+            prep_meta["transcoded"],
+            prep_meta["raw_bytes"],
+            prep_meta["upload_bytes"],
+            prep_meta["prepare_ms"],
+        )
         payload = self._build_chat_payload(
             image_base64=cloud_image_base64,
             prompt=self._build_prompt(
@@ -97,13 +125,32 @@ class ExternalProvider(VisionProvider):
                 self._build_retry_payload(cloud_image_base64, detected_scene, client_context, retry_index=3),
             ]
             for attempt, current_payload in enumerate(payloads, start=1):
+                attempt_start = time.perf_counter()
+                status_code = -1
+                upstream_req = "-"
+                http_ms = -1
+                parse_ms = -1
                 try:
-                    async with httpx.AsyncClient(timeout=self.timeout_sec, trust_env=self.trust_env_proxy) as client:
-                        resp = await client.post(self.api_url, headers=headers, json=current_payload)
-                        resp.raise_for_status()
-                        result = resp.json()
+                    client = self._get_http_client()
+                    http_start = time.perf_counter()
+                    resp = await client.post(self.api_url, headers=headers, json=current_payload)
+                    http_ms = int((time.perf_counter() - http_start) * 1000)
+                    status_code = resp.status_code
+                    upstream_req = self._extract_upstream_request_id(resp)
+                    resp.raise_for_status()
+                    parse_start = time.perf_counter()
+                    result = resp.json()
+                    parse_ms = int((time.perf_counter() - parse_start) * 1000)
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code if exc.response is not None else -1
+                    upstream_req = self._extract_upstream_request_id(exc.response)
+                    logger.warning(
+                        "external.analyze.http_error req=%s attempt=%d status=%d upstream_req=%s",
+                        req_id,
+                        attempt,
+                        status,
+                        upstream_req,
+                    )
                     if status == 429 and attempt < len(payloads):
                         self._consecutive_429 += 1
                         cooldown = self.rate_limit_cooldown_sec * min(3, max(1, self._consecutive_429))
@@ -118,6 +165,36 @@ class ExternalProvider(VisionProvider):
                         await asyncio.sleep(backoff)
                         continue
                     raise
+                except httpx.TimeoutException as exc:
+                    attempt_ms = int((time.perf_counter() - attempt_start) * 1000)
+                    self._update_dynamic_image_side(elapsed_ms=attempt_ms, timed_out=True, req_id=req_id)
+                    logger.warning(
+                        "external.analyze.timeout req=%s attempt=%d elapsed_ms=%d side=%d reason=%r",
+                        req_id,
+                        attempt,
+                        attempt_ms,
+                        self._current_image_side(),
+                        exc,
+                    )
+                    await self._reset_http_client()
+                    if attempt < len(payloads):
+                        await asyncio.sleep(0.22 * attempt)
+                        continue
+                    raise
+                except httpx.TransportError as exc:
+                    attempt_ms = int((time.perf_counter() - attempt_start) * 1000)
+                    logger.warning(
+                        "external.analyze.transport_error req=%s attempt=%d elapsed_ms=%d reason=%r",
+                        req_id,
+                        attempt,
+                        attempt_ms,
+                        exc,
+                    )
+                    await self._reset_http_client()
+                    if attempt < len(payloads):
+                        await asyncio.sleep(0.18 * attempt)
+                        continue
+                    raise
 
                 raw_text = self._extract_text(result)
                 events = self._events_from_raw_text(raw_text, detected_scene, client_context)
@@ -125,11 +202,18 @@ class ExternalProvider(VisionProvider):
                 is_duplicate = self._is_duplicate_tip_against_recent(tip, recent_tips) if tip else True
                 if not is_duplicate and events is not None and self._should_reject_redundant_move(events, client_context):
                     is_duplicate = True
+                attempt_ms = int((time.perf_counter() - attempt_start) * 1000)
+                self._update_dynamic_image_side(elapsed_ms=attempt_ms, timed_out=False, req_id=req_id)
                 logger.info(
-                    "external.analyze attempt=%d scene=%s status=%s incomplete=%s text_len=%d duplicate=%s",
+                    "external.analyze.attempt req=%s attempt=%d scene=%s status=%d upstream_req=%s request_ms=%d parse_ms=%d total_ms=%d incomplete=%s text_len=%d duplicate=%s",
+                    req_id,
                     attempt,
                     detected_scene,
-                    str(result.get("status", "")),
+                    status_code,
+                    upstream_req,
+                    http_ms,
+                    parse_ms,
+                    attempt_ms,
                     result.get("incomplete_details"),
                     len(raw_text),
                     is_duplicate,
@@ -138,7 +222,8 @@ class ExternalProvider(VisionProvider):
                     self._consecutive_429 = 0
                     self._rate_limited_until = 0.0
                     logger.info(
-                        "external.analyze accepted attempt=%d grid=%s tip=%s",
+                        "external.analyze.accepted req=%s attempt=%d grid=%s tip=%s",
+                        req_id,
                         attempt,
                         self._extract_strategy_grid(events),
                         tip,
@@ -147,26 +232,48 @@ class ExternalProvider(VisionProvider):
 
             raise RuntimeError("cloud repeated tip")
         except Exception as exc:
-            logger.warning("external.analyze failed: %s", exc)
+            logger.warning("external.analyze.failed req=%s reason=%r", req_id, exc)
             if self.strict_cloud:
                 raise
             return await self._fallback.analyze(image_base64, detected_scene, client_context)
 
-    def _prepare_cloud_image_base64(self, image_base64: str) -> str:
+    def _prepare_cloud_image_base64(self, image_base64: str) -> tuple[str, dict[str, Any]]:
         # Downscale before cloud inference to reduce latency and incomplete(length) responses.
+        prepare_start = time.perf_counter()
+        target_side = self._current_image_side()
+        cleaned = self._normalize_base64_image(image_base64)
+        meta: dict[str, Any] = {
+            "target_side": target_side,
+            "resized": False,
+            "transcoded": False,
+            "raw_bytes": 0,
+            "upload_bytes": 0,
+            "prepare_ms": 0,
+        }
         try:
-            raw = base64.b64decode(image_base64, validate=True)
+            raw = base64.b64decode(cleaned, validate=True)
+            meta["raw_bytes"] = len(raw)
             with Image.open(io.BytesIO(raw)) as image:
+                source_format = str(image.format or "").upper()
+                if max(image.size) <= target_side and source_format in {"JPEG", "JPG"}:
+                    meta["upload_bytes"] = len(raw)
+                    return cleaned, meta
                 rgb = image.convert("RGB")
-                max_side = self._env_int("ARK_IMAGE_MAX_SIDE", 960, 640, 1536)
-                quality = self._env_int("ARK_IMAGE_JPEG_QUALITY", 82, 60, 95)
-                if max(rgb.size) > max_side:
-                    rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                if max(rgb.size) > target_side:
+                    rgb.thumbnail((target_side, target_side), Image.Resampling.LANCZOS)
+                    meta["resized"] = True
+                if source_format not in {"JPEG", "JPG"}:
+                    meta["transcoded"] = True
                 buf = io.BytesIO()
-                rgb.save(buf, format="JPEG", quality=quality, optimize=True)
-                return base64.b64encode(buf.getvalue()).decode("utf-8")
+                rgb.save(buf, format="JPEG", quality=self.cloud_image_jpeg_quality, optimize=True)
+                encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+                meta["upload_bytes"] = len(buf.getvalue())
+                return encoded, meta
         except Exception:
-            return image_base64
+            meta["upload_bytes"] = max(meta["upload_bytes"], len(cleaned))
+            return cleaned, meta
+        finally:
+            meta["prepare_ms"] = int((time.perf_counter() - prepare_start) * 1000)
 
     def _build_retry_payload(
         self,
@@ -175,7 +282,7 @@ class ExternalProvider(VisionProvider):
         client_context: dict[str, Any],
         retry_index: int = 1,
     ) -> dict[str, Any]:
-        retry_tokens = max(220, min(720, self.max_output_tokens))
+        retry_tokens = max(128, min(self.retry_max_output_tokens, self.max_output_tokens))
         return self._build_chat_payload(
             image_base64=image_base64,
             prompt=self._build_retry_prompt(detected_scene, client_context, retry_index=retry_index),
@@ -731,6 +838,91 @@ class ExternalProvider(VisionProvider):
             if event.get("type") == "ui":
                 return str(event.get("text", ""))
         return ""
+
+    def _normalize_base64_image(self, image_base64: str) -> str:
+        text = image_base64.strip()
+        if text.startswith("data:image") and "," in text:
+            _, payload = text.split(",", 1)
+            return payload.strip()
+        return text
+
+    def _extract_upstream_request_id(self, response: httpx.Response | None) -> str:
+        if response is None:
+            return "-"
+        for key in ("x-request-id", "x-tt-logid", "x-logid", "x-amzn-requestid", "trace-id"):
+            value = response.headers.get(key, "").strip()
+            if value:
+                return value
+        return "-"
+
+    def _current_image_side(self) -> int:
+        if not self.dynamic_image_side:
+            return self.cloud_image_max_side
+        with self._state_lock:
+            return self._current_cloud_image_side
+
+    def _update_dynamic_image_side(self, elapsed_ms: int, timed_out: bool, req_id: str) -> None:
+        if not self.dynamic_image_side:
+            return
+        with self._state_lock:
+            before = self._current_cloud_image_side
+            if timed_out or elapsed_ms >= self.slow_request_ms:
+                self._slow_streak += 1
+                self._fast_streak = 0
+                self._current_cloud_image_side = max(
+                    self.cloud_image_min_side,
+                    self._current_cloud_image_side - self.dynamic_side_step_down,
+                )
+                reason = "timeout" if timed_out else "slow"
+            elif elapsed_ms <= self.fast_request_ms:
+                self._fast_streak += 1
+                self._slow_streak = max(0, self._slow_streak - 1)
+                reason = "fast"
+                if self._fast_streak >= 3:
+                    self._fast_streak = 0
+                    self._current_cloud_image_side = min(
+                        self.cloud_image_max_side,
+                        self._current_cloud_image_side + self.dynamic_side_step_up,
+                    )
+            else:
+                self._fast_streak = 0
+                self._slow_streak = max(0, self._slow_streak - 1)
+                reason = "steady"
+            after = self._current_cloud_image_side
+
+        if before != after:
+            logger.info(
+                "external.analyze.dynamic_side req=%s reason=%s elapsed_ms=%d from=%d to=%d",
+                req_id,
+                reason,
+                elapsed_ms,
+                before,
+                after,
+            )
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        with self._http_client_lock:
+            if self._http_client is None or self._http_client.is_closed:
+                self._http_client = httpx.AsyncClient(
+                    timeout=self.timeout_sec,
+                    trust_env=self.trust_env_proxy,
+                )
+            return self._http_client
+
+    async def _reset_http_client(self) -> None:
+        client: httpx.AsyncClient | None = None
+        with self._http_client_lock:
+            if self._http_client is not None:
+                client = self._http_client
+                self._http_client = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                return
+
+    async def aclose(self) -> None:
+        await self._reset_http_client()
 
     def _env_bool(self, key: str, default: bool) -> bool:
         raw = os.getenv(key)

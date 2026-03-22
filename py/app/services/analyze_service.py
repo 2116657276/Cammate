@@ -88,6 +88,7 @@ async def event_stream(req: AnalyzeRequest):
     provider_timeout_sec = _read_timeout_sec()
     total_budget_sec = _read_total_budget_sec()
     client_ctx = _normalize_client_context(req.client_context.model_dump())
+    client_ctx["request_id"] = request_id
     capture_mode = str(client_ctx.get("capture_mode") or "auto").strip().lower()
     if capture_mode not in {"auto", "portrait", "general", "food"}:
         capture_mode = "auto"

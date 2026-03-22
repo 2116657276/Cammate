@@ -18,6 +18,7 @@ from app.api.routes.scene import router as scene_router
 from app.core.database import ensure_db
 from app.core.logging import request_id_ctx_var
 from app.core.logging import setup_logging
+from providers.factory import close_provider
 setup_logging()
 logger = logging.getLogger("app.api")
 
@@ -56,6 +57,10 @@ def create_app() -> FastAPI:
             )
             request_id_ctx_var.reset(token)
 
+    @app.on_event("shutdown")
+    async def close_runtime_resources() -> None:
+        await close_provider()
+
     has_ark_key = bool(os.getenv("ARK_API_KEY", "").strip() or os.getenv("EXTERNAL_VISION_API_KEY", "").strip())
     logger.info(
         "startup.config AI_PROVIDER=%s ARK_API_KEY_present=%s ARK_MODEL=%s ARK_API_URL=%s ARK_CHAT_API_URL=%s ARK_REASONING_EFFORT=%s ARK_TRUST_ENV=%s ARK_MAX_OUTPUT_TOKENS=%s EXTERNAL_TIMEOUT_SEC=%s APP_LOG_LEVEL=%s APP_LOG_DIR=%s ENV_FILES=%s",
@@ -66,7 +71,7 @@ def create_app() -> FastAPI:
         os.getenv("ARK_CHAT_API_URL", "<auto_from_ARK_API_URL>"),
         os.getenv("ARK_REASONING_EFFORT", "minimal"),
         os.getenv("ARK_TRUST_ENV", "false"),
-        os.getenv("ARK_MAX_OUTPUT_TOKENS", "1200"),
+        os.getenv("ARK_MAX_OUTPUT_TOKENS", "480"),
         os.getenv("EXTERNAL_TIMEOUT_SEC", "13.2"),
         os.getenv("APP_LOG_LEVEL", "INFO"),
         os.getenv("APP_LOG_DIR", "<project>/logs"),
