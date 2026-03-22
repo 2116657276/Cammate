@@ -54,11 +54,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "CamMate"
         private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
-        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 1_800L
-        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_620L
-        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 810L
+        private const val STABLE_SCENE_DETECT_INTERVAL_MS = 900L
+        private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_400L
+        private const val MIN_UNSTABLE_SCENE_DETECT_INTERVAL_MS = 650L
         private const val SCENE_SWITCH_BOOST_WINDOW_MS = 2_200L
-        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 810L
+        private const val SCENE_SWITCH_BOOST_INTERVAL_MS = 500L
         private const val GENERAL_SUBJECT_MIN_CONFIDENCE = 0.54f
         private const val GENERAL_SUBJECT_MIN_AREA = 0.022f
         private const val GLOBAL_SUBJECT_MIN_AREA = 0.010f
@@ -114,6 +114,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var sceneFastDetectUntilMs = 0L
     private var pendingSceneSwitch: SceneType? = null
     private var pendingSceneSwitchVotes = 0
+    private var pendingSubjectJumpCenter: Offset? = null
+    private var pendingSubjectJumpVotes = 0
 
     private var bearerToken: String = ""
 
@@ -298,6 +300,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sceneAutoSwitchLockedByManual = false
         pendingSceneSwitch = null
         pendingSceneSwitchVotes = 0
+        pendingSubjectJumpCenter = null
+        pendingSubjectJumpVotes = 0
         _uiState.update {
             it.copy(
                 aiEnabled = true,
@@ -330,6 +334,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sceneFastDetectUntilMs = 0L
         pendingSceneSwitch = null
         pendingSceneSwitchVotes = 0
+        pendingSubjectJumpCenter = null
+        pendingSubjectJumpVotes = 0
         _uiState.update { it.copy(showPostCaptureChoice = false) }
     }
 
@@ -825,8 +831,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sceneConfidence = confidenceForSubject,
                 bbox = classified.bbox,
             )
-            val incomingBox = if (decision.acceptIncomingOverlay && !suppressSubject) classified.bbox else null
-            val incomingCenter = if (decision.acceptIncomingOverlay && !suppressSubject) classified.center else null
+            var incomingBox = if (decision.acceptIncomingOverlay && !suppressSubject) classified.bbox else null
+            var incomingCenter = if (decision.acceptIncomingOverlay && !suppressSubject) classified.center else null
+
+            val previousCenter = state.overlay.subjectCenterNorm
+            if (state.frameStable && previousCenter != null && incomingCenter != null) {
+                val shift = offsetDistance(previousCenter, incomingCenter)
+                if (shift <= 0.018f) {
+                    // Ignore tiny jitter while frame is stable.
+                    incomingCenter = previousCenter
+                } else if (shift >= 0.12f) {
+                    val confidenceGain = incomingConfidence - state.sceneConfidence.coerceIn(0f, 1f)
+                    val sameJump = pendingSubjectJumpCenter?.let { offsetDistance(it, incomingCenter!!) <= 0.04f } ?: false
+                    pendingSubjectJumpVotes = if (sameJump) pendingSubjectJumpVotes + 1 else 1
+                    pendingSubjectJumpCenter = incomingCenter
+                    val acceptJump = confidenceGain >= 0.16f || pendingSubjectJumpVotes >= 2
+                    if (!acceptJump) {
+                        // A sudden jump needs a second consistent frame to avoid random drifting.
+                        incomingCenter = previousCenter
+                        incomingBox = state.overlay.bboxNorm
+                    } else {
+                        pendingSubjectJumpCenter = null
+                        pendingSubjectJumpVotes = 0
+                    }
+                } else {
+                    pendingSubjectJumpCenter = null
+                    pendingSubjectJumpVotes = 0
+                }
+            } else if (!state.frameStable) {
+                pendingSubjectJumpCenter = null
+                pendingSubjectJumpVotes = 0
+            }
+
             val blendedBox = blendRect(
                 previous = state.overlay.bboxNorm,
                 incoming = incomingBox,
@@ -1318,6 +1354,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastSceneClassifyAt = 0L
         pendingSceneSwitch = null
         pendingSceneSwitchVotes = 0
+        pendingSubjectJumpCenter = null
+        pendingSubjectJumpVotes = 0
         viewModelScope.launch { settingsRepository.updateCaptureMode(mode) }
     }
 
@@ -1383,6 +1421,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             right = (base.right + (incoming.right - base.right) * safe).coerceIn(0f, 1f),
             bottom = (base.bottom + (incoming.bottom - base.bottom) * safe).coerceIn(0f, 1f),
         )
+    }
+
+    private fun offsetDistance(a: Offset, b: Offset): Float {
+        val dx = (a.x - b.x)
+        val dy = (a.y - b.y)
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun rectArea(rect: Rect?): Float {
