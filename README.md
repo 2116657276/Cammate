@@ -1,29 +1,23 @@
 # Cammate
 
-Android + FastAPI 的 AI 拍摄应用，主流程为：
-`登录/注册 -> 场景识别 -> AI 构图建议 -> 拍照 -> AI 修图 -> 评分反馈`
+Android + FastAPI 的 AI 拍摄应用。当前代码已经覆盖：
+`登录/注册 -> 场景识别 -> AI 构图建议 -> 拍照 -> AI 修图 -> 评分反馈 -> 可选发布社区 -> 社区推荐 -> AI 融合`
 
-## 文档索引
+## 文档分层（主文档三类）
 
-- 开发文档：[`DEVELOPMENT.md`](./DEVELOPMENT.md)
-- 测试文档：[`TESTING.md`](./TESTING.md)
+- `README`（本文件）：项目入口、快速启动、文档导航
+- 开发文档（当前已完成）：[`DEVELOPMENT.md`](./DEVELOPMENT.md)
+- 设计文档（最终版目标 + 未来补充）：[`DESIGN.md`](./DESIGN.md)
 
 ## 快速启动
 
-### 1) Python 服务端
+### 1) 启动 Python 服务端
 
-在项目根目录启动（推荐）：
+在项目根目录执行：
 
 ```bash
 mamba run -n Cam python -m pip install -r py/requirements.txt
 mamba run -n Cam python -m uvicorn main:app --app-dir py --host 0.0.0.0 --port 8000
-```
-
-或进入 `py/` 启动：
-
-```bash
-cd py
-mamba run -n Cam python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 健康检查：
@@ -32,19 +26,18 @@ mamba run -n Cam python -m uvicorn main:app --host 0.0.0.0 --port 8000
 curl http://127.0.0.1:8000/healthz
 ```
 
-### 2) Android 客户端
+### 2) 运行 Android 客户端
 
 1. Android Studio 打开 `kotlin/`
-2. 等待 Gradle Sync
-3. 运行到模拟器/真机
-4. 在 `Settings` 中确认 `Server URL`
+2. Gradle Sync 完成后运行 `app`
+3. 在 `Settings` 设置服务地址
 
-默认地址：
+常用地址：
 
 - 模拟器：`http://10.0.2.2:8000`
 - 真机：`http://<你的电脑局域网IP>:8000`
 
-## 核心接口
+## 当前后端接口（已实现）
 
 - `GET /healthz`
 - `POST /auth/register`
@@ -54,61 +47,20 @@ curl http://127.0.0.1:8000/healthz
 - `POST /scene/detect`
 - `POST /analyze`（NDJSON）
 - `POST /retouch`
-- `POST /feedback`
+- `POST /feedback`（支持 `review_text`）
+- `POST /community/posts`
+- `GET /community/feed`
+- `GET /community/recommendations`
+- `GET /community/posts/{post_id}/image`
+- `POST /community/compose`
 
-## 环境变量（现状）
+## 配置说明（简版）
 
-服务端会按顺序读取 `py/.env.local`、`py/.env`，仅在进程环境缺失时填充变量。
+服务端按顺序加载 `py/.env.local`、`py/.env`（进程环境变量优先）。
 
-### 分析链路（构图建议）
+- 构图分析：`ARK_*`
+- 修图：`ARK_IMAGE_*`
+- 社区：`COMMUNITY_*`
+- 社区图像模型可选覆盖：`COMMUNITY_IMAGE_*`（未配置时回退到 `ARK_IMAGE_*`）
 
-```bash
-AI_PROVIDER=external
-ARK_API_KEY=<analyze_key>
-ARK_API_URL=https://ark.cn-beijing.volces.com/api/v3/responses
-ARK_MODEL=doubao-seed-2-0-lite-260215
-ARK_REASONING_EFFORT=minimal
-ARK_TEMPERATURE=0.33
-ARK_TRUST_ENV=false
-ARK_STRICT_CLOUD=true
-EXTERNAL_TIMEOUT_SEC=13.2
-ARK_MAX_OUTPUT_TOKENS=480
-ARK_RETRY_MAX_OUTPUT_TOKENS=360
-ARK_RATE_LIMIT_COOLDOWN_SEC=12
-```
-
-分析性能相关（可选）：
-
-```bash
-ARK_IMAGE_MAX_SIDE=960
-ARK_IMAGE_MIN_SIDE=640
-ARK_IMAGE_JPEG_QUALITY=82
-ARK_DYNAMIC_IMAGE_SIDE=true
-ARK_SLOW_REQUEST_MS=9800
-ARK_FAST_REQUEST_MS=4300
-ARK_DYNAMIC_SIDE_STEP_DOWN=128
-ARK_DYNAMIC_SIDE_STEP_UP=64
-```
-
-### 修图链路（与分析链路独立）
-
-```bash
-ARK_IMAGE_API_URL=https://ark.cn-beijing.volces.com/api/v3/images/generations
-ARK_IMAGE_API_KEY=<retouch_key>
-ARK_IMAGE_MODEL=doubao-seedream-5-0-260128
-ARK_IMAGE_SIZE=2K
-ARK_IMAGE_RESPONSE_FORMAT=url
-ARK_IMAGE_SEQUENTIAL=disabled
-ARK_IMAGE_WATERMARK=true
-ARK_IMAGE_STREAM=false
-ARK_IMAGE_MAX_INPUT_SIDE=2048
-ARK_IMAGE_JPEG_QUALITY=94
-ARK_IMAGE_PORTRAIT_MIN_STRENGTH=0.48
-```
-
-## 日志
-
-- 服务端日志：`py/logs/server.log`
-- 每次请求包含 `req=<request_id>`，用于客户端与服务端链路对齐排障
-
-客户端更详细维护说明、架构说明和排障建议见 [`DEVELOPMENT.md`](./DEVELOPMENT.md)。
+详细配置、当前实现细节见 [`DEVELOPMENT.md`](./DEVELOPMENT.md)；最终目标配置规范见 [`DESIGN.md`](./DESIGN.md)。
