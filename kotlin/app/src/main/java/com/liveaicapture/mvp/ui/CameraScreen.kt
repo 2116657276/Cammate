@@ -87,6 +87,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cameraswitch
 import androidx.compose.material.icons.outlined.Exposure
 import androidx.compose.material.icons.outlined.FlashOn
+import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Tune
@@ -111,6 +112,7 @@ fun CameraScreen(
     openSettings: () -> Unit,
     openRetouch: () -> Unit,
     openFeedback: () -> Unit,
+    openCommunity: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -326,17 +328,31 @@ fun CameraScreen(
                     )
                 }
 
-                IconButton(
-                    onClick = openSettings,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(Color(0x80000000), CircleShape),
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Settings,
-                        contentDescription = "设置",
-                        tint = Color.White,
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconButton(
+                        onClick = openCommunity,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(Color(0x80000000), CircleShape),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.People,
+                            contentDescription = "社区",
+                            tint = Color.White,
+                        )
+                    }
+                    IconButton(
+                        onClick = openSettings,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(Color(0x80000000), CircleShape),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = "设置",
+                            tint = Color.White,
+                        )
+                    }
                 }
             }
 

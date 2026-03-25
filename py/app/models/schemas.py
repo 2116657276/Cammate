@@ -94,11 +94,59 @@ class FeedbackRequest(BaseModel):
     tip_text: str = Field(default="", max_length=120)
     photo_uri: str | None = Field(default=None, max_length=500)
     is_retouch: bool = False
+    review_text: str = Field(default="", max_length=280)
     session_meta: dict[str, Any] | None = None
 
 
 class FeedbackResponse(BaseModel):
     feedback_id: int
+
+
+class CommunityPublishRequest(BaseModel):
+    feedback_id: int = Field(ge=1)
+    image_base64: str = Field(min_length=16)
+    place_tag: str = Field(min_length=1, max_length=48)
+    scene_type: Literal["portrait", "general", "landscape", "food", "night"] = "general"
+
+
+class CommunityPostView(BaseModel):
+    id: int
+    user_id: int
+    user_nickname: str
+    feedback_id: int
+    image_url: str
+    scene_type: str
+    place_tag: str
+    rating: int
+    review_text: str
+    created_at: int
+
+
+class CommunityFeedResponse(BaseModel):
+    items: list[CommunityPostView]
+    next_offset: int
+
+
+class CommunityRecommendationView(BaseModel):
+    post: CommunityPostView
+    score: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+
+class CommunityRecommendationsResponse(BaseModel):
+    items: list[CommunityRecommendationView]
+
+
+class CommunityComposeRequest(BaseModel):
+    reference_post_id: int = Field(ge=1)
+    person_image_base64: str = Field(min_length=16)
+    strength: float = Field(default=0.45, ge=0.0, le=1.0)
+
+
+class CommunityComposeResponse(BaseModel):
+    composed_image_base64: str
+    provider: str
+    model: str
 
 
 @dataclass

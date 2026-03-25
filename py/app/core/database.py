@@ -47,12 +47,48 @@ def ensure_db() -> None:
                 tip_text TEXT NOT NULL,
                 photo_uri TEXT,
                 is_retouch INTEGER NOT NULL,
+                review_text TEXT NOT NULL DEFAULT '',
                 session_meta TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
         )
+        _ensure_feedback_review_text_column(conn)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS community_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                feedback_id INTEGER NOT NULL,
+                image_path TEXT NOT NULL,
+                scene_type TEXT NOT NULL,
+                place_tag TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                review_text TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                moderation_status TEXT NOT NULL DEFAULT 'published',
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(feedback_id) REFERENCES feedback(id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_scene_place_created "
+            "ON community_posts(scene_type, place_tag, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_created "
+            "ON community_posts(created_at DESC)"
+        )
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_feedback_review_text_column(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(feedback)").fetchall()
+    cols = {str(row["name"]).strip().lower() for row in rows}
+    if "review_text" in cols:
+        return
+    conn.execute("ALTER TABLE feedback ADD COLUMN review_text TEXT NOT NULL DEFAULT ''")

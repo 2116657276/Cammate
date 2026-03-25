@@ -3,13 +3,17 @@ package com.liveaicapture.mvp.ui
 import android.net.Uri
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,9 +25,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.rememberScrollState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.liveaicapture.mvp.ui.components.CamMatePage
 import com.liveaicapture.mvp.ui.components.SectionCard
+
+private val publishSceneOptions = listOf("general", "portrait", "landscape", "food", "night")
 
 @Composable
 fun FeedbackScreen(
@@ -101,6 +108,56 @@ fun FeedbackScreen(
                     }
                 }
 
+                OutlinedTextField(
+                    value = state.reviewText,
+                    onValueChange = { viewModel.updateFeedbackReviewText(it) },
+                    label = { Text("文字评价（可选）") },
+                    placeholder = { Text("写下本次拍摄体验和建议") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("发布到社区")
+                        Text("勾选后会在提交评分后自动发布", color = MaterialTheme.colorScheme.secondary)
+                    }
+                    Switch(
+                        checked = state.publishToCommunity,
+                        onCheckedChange = { viewModel.updateFeedbackPublishEnabled(it) },
+                    )
+                }
+
+                if (state.publishToCommunity) {
+                    OutlinedTextField(
+                        value = state.publishPlaceTag,
+                        onValueChange = { viewModel.updateFeedbackPublishPlaceTag(it) },
+                        label = { Text("地点标签") },
+                        placeholder = { Text("例如：外滩、森林、公园") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        publishSceneOptions.forEach { scene ->
+                            FilterChip(
+                                selected = state.publishSceneType == scene,
+                                onClick = { viewModel.updateFeedbackPublishSceneType(scene) },
+                                label = { Text(scene) },
+                            )
+                        }
+                    }
+                }
+
                 state.errorMessage?.let { Text(it, color = Color(0xFFB42318)) }
 
                 Button(
@@ -108,7 +165,7 @@ fun FeedbackScreen(
                     enabled = !state.submitting,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (state.submitting) "提交中..." else "完成并提交")
+                    Text(if (state.submitting) "提交中..." else "完成评分并提交")
                 }
             }
         }

@@ -16,6 +16,9 @@ import com.liveaicapture.mvp.data.AppSettings
 import com.liveaicapture.mvp.data.AuthUiState
 import com.liveaicapture.mvp.data.CameraUiState
 import com.liveaicapture.mvp.data.CaptureMode
+import com.liveaicapture.mvp.data.CommunityPostItem
+import com.liveaicapture.mvp.data.CommunityRecommendationItem
+import com.liveaicapture.mvp.data.CommunityUiState
 import com.liveaicapture.mvp.data.FeedbackUiState
 import com.liveaicapture.mvp.data.GuideProvider
 import com.liveaicapture.mvp.data.RetouchMode
@@ -27,6 +30,8 @@ import com.liveaicapture.mvp.data.SettingsRepository
 import com.liveaicapture.mvp.log.AppLog
 import com.liveaicapture.mvp.network.AnalyzeApiClient
 import com.liveaicapture.mvp.network.AuthApiClient
+import com.liveaicapture.mvp.network.CommunityApiClient
+import com.liveaicapture.mvp.network.CommunityPostDto
 import com.liveaicapture.mvp.network.FeedbackApiClient
 import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
@@ -71,6 +76,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val authApiClient = AuthApiClient()
     private val feedbackApiClient = FeedbackApiClient()
     private val retouchApiClient = RetouchApiClient()
+    private val communityApiClient = CommunityApiClient()
     private var ttsSpeaker: TtsSpeaker? = null
     private val appLogger = AppLog.get(application)
 
@@ -85,6 +91,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _feedbackUiState = MutableStateFlow(FeedbackUiState())
     val feedbackUiState: StateFlow<FeedbackUiState> = _feedbackUiState.asStateFlow()
+
+    private val _communityUiState = MutableStateFlow(CommunityUiState())
+    val communityUiState: StateFlow<CommunityUiState> = _communityUiState.asStateFlow()
 
     private val requestGate = Any()
     private var analyzeInFlight = false
@@ -116,6 +125,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingSceneSwitchVotes = 0
     private var pendingSubjectJumpCenter: Offset? = null
     private var pendingSubjectJumpVotes = 0
+    private var communityFeedOffset = 0
 
     private var bearerToken: String = ""
 
@@ -146,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!session.isAvailable || session.expiresAtEpochSec <= nowSec) {
                 sessionRepository.clearSession()
                 bearerToken = ""
+                syncCommunityAuthHeader()
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
                     authenticated = false,
@@ -156,6 +167,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             bearerToken = session.bearerToken
+            syncCommunityAuthHeader()
             try {
                 val user = authApiClient.me(_uiState.value.settings.serverUrl, bearerToken)
                 _authUiState.value = AuthUiState(
@@ -172,6 +184,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 sessionRepository.clearSession()
                 bearerToken = ""
+                syncCommunityAuthHeader()
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
                     authenticated = false,
@@ -197,6 +210,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     password = password,
                 )
                 bearerToken = result.bearerToken
+                syncCommunityAuthHeader()
                 sessionRepository.saveSession(result.bearerToken, result.expiresInSec, result.user)
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
@@ -236,6 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     nickname = nickname,
                 )
                 bearerToken = result.bearerToken
+                syncCommunityAuthHeader()
                 sessionRepository.saveSession(result.bearerToken, result.expiresInSec, result.user)
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
@@ -280,6 +295,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             sessionRepository.clearSession()
             bearerToken = ""
+            syncCommunityAuthHeader()
             _authUiState.value = AuthUiState(
                 checkingSession = false,
                 authenticated = false,
@@ -295,6 +311,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun resetFlowAfterLogout() {
         _retouchUiState.value = RetouchUiState()
         _feedbackUiState.value = FeedbackUiState()
+        _communityUiState.value = CommunityUiState()
+        communityFeedOffset = 0
         lastSuccessfulTipText = ""
         recentSuccessfulTips.clear()
         sceneAutoSwitchLockedByManual = false
@@ -1104,6 +1122,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isRetouched = false,
             scene = _uiState.value.detectedScene,
             tipText = _uiState.value.tipText,
+            publishSceneType = _uiState.value.detectedScene.raw,
         )
     }
 
@@ -1149,6 +1168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isRetouched = true,
                 scene = _uiState.value.detectedScene,
                 tipText = _uiState.value.tipText,
+                publishSceneType = _uiState.value.detectedScene.raw,
             )
         }
     }
@@ -1159,11 +1179,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateFeedbackReviewText(value: String) {
+        _feedbackUiState.update {
+            it.copy(reviewText = value.take(280), errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishEnabled(enabled: Boolean) {
+        _feedbackUiState.update {
+            it.copy(publishToCommunity = enabled, errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishPlaceTag(value: String) {
+        _feedbackUiState.update {
+            it.copy(publishPlaceTag = value.take(48), errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishSceneType(value: String) {
+        val normalized = value.trim().lowercase().ifBlank { "general" }
+        _feedbackUiState.update {
+            it.copy(publishSceneType = normalized, errorMessage = null)
+        }
+    }
+
     fun submitFeedback() {
         val current = _feedbackUiState.value
         if (!current.visible || current.submitting) return
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _feedbackUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (current.publishToCommunity && current.publishPlaceTag.trim().isBlank()) {
+            _feedbackUiState.update { it.copy(errorMessage = "发布社区前请填写地点标签") }
+            return
+        }
+        if (current.publishToCommunity && current.photoUri.isNullOrBlank()) {
+            _feedbackUiState.update { it.copy(errorMessage = "未找到可发布图片，请重新拍摄") }
             return
         }
 
@@ -1179,6 +1232,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     tipText = current.tipText,
                     photoUri = current.photoUri,
                     isRetouch = current.isRetouched,
+                    reviewText = current.reviewText.trim(),
                     sessionMeta = buildJsonObject {
                         val retouchState = _retouchUiState.value
                         val presetValue = if (retouchState.mode == RetouchMode.CUSTOM) "custom" else retouchState.preset.raw
@@ -1193,14 +1247,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 if (feedbackId <= 0) throw IllegalStateException("反馈提交失败")
+                var publishedPostId: Int? = null
+                if (current.publishToCommunity) {
+                    val photoUri = current.photoUri ?: throw IllegalStateException("未找到可发布图片")
+                    val imageBase64 = encodePhotoUriToBase64(photoUri)
+                    val post = communityApiClient.publishPost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        feedbackId = feedbackId,
+                        imageBase64 = imageBase64,
+                        placeTag = current.publishPlaceTag.trim(),
+                        sceneType = current.publishSceneType,
+                    )
+                    publishedPostId = post.id.takeIf { it > 0 }
+                    refreshCommunityFeed()
+                }
                 _feedbackUiState.update {
                     it.copy(
                         submitting = false,
                         submitted = true,
+                        publishedPostId = publishedPostId,
                         errorMessage = null,
                     )
                 }
-                logClientInfo("feedback.submit", "success feedbackId=$feedbackId")
+                logClientInfo("feedback.submit", "success feedbackId=$feedbackId postId=${publishedPostId ?: -1}")
             } catch (e: Exception) {
                 logClientError(
                     scope = "feedback.submit",
@@ -1222,6 +1292,217 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState()
         _retouchUiState.value = RetouchUiState()
         _uiState.update { it.copy(statusText = "反馈已提交，感谢支持", showPostCaptureChoice = false) }
+    }
+
+    fun clearCommunityError() {
+        _communityUiState.update { it.copy(errorMessage = null) }
+    }
+
+    fun refreshCommunityFeed(reset: Boolean = true) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (reset) {
+            communityFeedOffset = 0
+            _communityUiState.update {
+                it.copy(
+                    loadingFeed = true,
+                    feed = emptyList(),
+                    errorMessage = null,
+                )
+            }
+        } else {
+            _communityUiState.update { it.copy(loadingFeed = true, errorMessage = null) }
+        }
+
+        viewModelScope.launch {
+            try {
+                val currentFeed = if (reset) emptyList() else _communityUiState.value.feed
+                val result = communityApiClient.fetchFeed(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    offset = communityFeedOffset,
+                    limit = 20,
+                )
+                val merged = if (reset) {
+                    result.items.map { it.toCommunityPost(_uiState.value.settings.serverUrl) }
+                } else {
+                    val appended = result.items.map { it.toCommunityPost(_uiState.value.settings.serverUrl) }
+                    (currentFeed + appended).distinctBy { it.id }
+                }
+                communityFeedOffset = result.nextOffset
+                _communityUiState.update {
+                    it.copy(
+                        loadingFeed = false,
+                        feed = merged,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.feed",
+                    throwable = e,
+                    userHint = "加载社区内容失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingFeed = false,
+                        errorMessage = "加载社区内容失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateRecommendationPlaceTag(value: String) {
+        _communityUiState.update { it.copy(recommendationPlaceTag = value.take(48)) }
+    }
+
+    fun updateRecommendationSceneType(value: String) {
+        val scene = value.trim().lowercase().ifBlank { "general" }
+        _communityUiState.update { it.copy(recommendationSceneType = scene) }
+    }
+
+    fun refreshRecommendations() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val snapshot = _communityUiState.value
+        _communityUiState.update { it.copy(loadingRecommendations = true, errorMessage = null) }
+        viewModelScope.launch {
+            try {
+                val items = communityApiClient.fetchRecommendations(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    placeTag = snapshot.recommendationPlaceTag,
+                    sceneType = snapshot.recommendationSceneType,
+                    limit = 12,
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingRecommendations = false,
+                        recommendations = items.map { item ->
+                            CommunityRecommendationItem(
+                                post = item.post.toCommunityPost(_uiState.value.settings.serverUrl),
+                                score = item.score,
+                                reason = item.reason,
+                            )
+                        },
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.recommendations",
+                    throwable = e,
+                    userHint = "推荐加载失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingRecommendations = false,
+                        errorMessage = "推荐加载失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectCommunityReferencePost(postId: Int?) {
+        _communityUiState.update { it.copy(referencePostId = postId, errorMessage = null) }
+    }
+
+    fun updateCommunityPersonImageUri(uri: String?) {
+        _communityUiState.update { it.copy(personImageUri = uri, errorMessage = null) }
+    }
+
+    fun updateCommunityComposeStrength(value: Float) {
+        _communityUiState.update { it.copy(composeStrength = value.coerceIn(0f, 1f)) }
+    }
+
+    fun clearComposedPreview() {
+        _communityUiState.update {
+            it.copy(
+                composedPreviewBase64 = null,
+                composeRequestId = "",
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun composeCommunityImage() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val referenceId = state.referencePostId
+        if (referenceId == null || referenceId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择参考照片") }
+            return
+        }
+        val personUri = state.personImageUri
+        if (personUri.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择半身或全身照") }
+            return
+        }
+        if (state.composing) return
+
+        viewModelScope.launch {
+            _communityUiState.update { it.copy(composing = true, errorMessage = null) }
+            try {
+                val personBase64 = encodePhotoUriToBase64(personUri)
+                val result = communityApiClient.compose(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    referencePostId = referenceId,
+                    personImageBase64 = personBase64,
+                    strength = state.composeStrength,
+                )
+                _communityUiState.update {
+                    it.copy(
+                        composing = false,
+                        composedPreviewBase64 = result.imageBase64,
+                        composeRequestId = result.requestId,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose",
+                    throwable = e,
+                    userHint = "AI 融合失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        composing = false,
+                        errorMessage = "AI 融合失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun saveComposedPreviewToGallery(onSaved: (String?) -> Unit = {}) {
+        val preview = _communityUiState.value.composedPreviewBase64
+        if (preview.isNullOrBlank()) {
+            onSaved(null)
+            return
+        }
+        viewModelScope.launch {
+            val uri = try {
+                saveBase64ToGallery(preview, "CamMate_CommunityCompose")
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose.save",
+                    throwable = e,
+                    userHint = "融合结果保存失败",
+                )
+                null
+            }
+            onSaved(uri)
+        }
     }
 
     private fun encodePhotoUriToBase64(photoUri: String): String {
@@ -1326,6 +1607,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun logClientInfo(scope: String, message: String) {
         appLogger.i(TAG, "[$scope] $message")
+    }
+
+    private fun syncCommunityAuthHeader() {
+        _communityUiState.update {
+            it.copy(
+                authHeader = if (bearerToken.isNotBlank()) "Bearer $bearerToken" else "",
+            )
+        }
+    }
+
+    private fun CommunityPostDto.toCommunityPost(serverUrl: String): CommunityPostItem {
+        return CommunityPostItem(
+            id = id,
+            userId = userId,
+            userNickname = userNickname,
+            feedbackId = feedbackId,
+            imageUrl = buildAbsoluteImageUrl(serverUrl = serverUrl, imagePath = imageUrl),
+            sceneType = sceneType,
+            placeTag = placeTag,
+            rating = rating.coerceIn(1, 5),
+            reviewText = reviewText,
+            createdAt = createdAt,
+        )
+    }
+
+    private fun buildAbsoluteImageUrl(serverUrl: String, imagePath: String): String {
+        val trimmed = imagePath.trim()
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
+        val prefix = serverUrl.trimEnd('/')
+        val suffix = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        return prefix + suffix
     }
 
     fun updateServerUrl(value: String) {

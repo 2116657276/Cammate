@@ -150,8 +150,49 @@ data class FeedbackUiState(
     val scene: SceneType = SceneType.GENERAL,
     val tipText: String = "",
     val rating: Int = 5,
+    val reviewText: String = "",
+    val publishToCommunity: Boolean = false,
+    val publishPlaceTag: String = "",
+    val publishSceneType: String = "general",
     val submitting: Boolean = false,
     val submitted: Boolean = false,
+    val publishedPostId: Int? = null,
+    val errorMessage: String? = null,
+)
+
+data class CommunityPostItem(
+    val id: Int,
+    val userId: Int,
+    val userNickname: String,
+    val feedbackId: Int,
+    val imageUrl: String,
+    val sceneType: String,
+    val placeTag: String,
+    val rating: Int,
+    val reviewText: String,
+    val createdAt: Long,
+)
+
+data class CommunityRecommendationItem(
+    val post: CommunityPostItem,
+    val score: Float,
+    val reason: String,
+)
+
+data class CommunityUiState(
+    val loadingFeed: Boolean = false,
+    val loadingRecommendations: Boolean = false,
+    val composing: Boolean = false,
+    val feed: List<CommunityPostItem> = emptyList(),
+    val recommendations: List<CommunityRecommendationItem> = emptyList(),
+    val recommendationPlaceTag: String = "",
+    val recommendationSceneType: String = "general",
+    val referencePostId: Int? = null,
+    val personImageUri: String? = null,
+    val composedPreviewBase64: String? = null,
+    val composeStrength: Float = 0.45f,
+    val composeRequestId: String = "",
+    val authHeader: String = "",
     val errorMessage: String? = null,
 )
 

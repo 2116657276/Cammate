@@ -19,6 +19,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.liveaicapture.mvp.ui.CameraScreen
+import com.liveaicapture.mvp.ui.CommunityScreen
 import com.liveaicapture.mvp.ui.FeedbackScreen
 import com.liveaicapture.mvp.ui.LoginScreen
 import com.liveaicapture.mvp.ui.MainViewModel
@@ -107,6 +108,7 @@ fun CamMateApp() {
                     }
                 },
                 openFeedback = { navController.navigate("feedback") },
+                openCommunity = { navController.navigate("community") },
             )
         }
         composable("settings") {
@@ -144,6 +146,12 @@ fun CamMateApp() {
                         launchSingleTop = true
                     }
                 },
+            )
+        }
+        composable("community") {
+            CommunityScreen(
+                viewModel = vm,
+                onBack = { navController.popBackStack() },
             )
         }
     }

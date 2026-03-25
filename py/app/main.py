@@ -11,6 +11,7 @@ from fastapi import Response
 
 from app.api.routes.analyze import router as analyze_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.community import router as community_router
 from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
 from app.api.routes.retouch import router as retouch_router
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(analyze_router)
     app.include_router(retouch_router)
     app.include_router(feedback_router)
+    app.include_router(community_router)
 
     @app.middleware("http")
     async def request_log_middleware(request: Request, call_next) -> Response:
@@ -76,6 +78,15 @@ def create_app() -> FastAPI:
         os.getenv("APP_LOG_LEVEL", "INFO"),
         os.getenv("APP_LOG_DIR", "<project>/logs"),
         os.getenv("APP_CONFIG_LOADED_ENV_FILES", "<none>"),
+    )
+    logger.info(
+        "startup.community COMMUNITY_UPLOAD_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s",
+        os.getenv("COMMUNITY_UPLOAD_DIR", "<project>/uploads/community"),
+        os.getenv("COMMUNITY_UPLOAD_MAX_SIDE", "1920"),
+        os.getenv("COMMUNITY_RECOMMEND_LIMIT_DEFAULT", "12"),
+        os.getenv("COMMUNITY_BLOCKED_WORDS", "广告,引流,加微信"),
+        os.getenv("COMMUNITY_IMAGE_API_URL", "<fallback:ARK_IMAGE_API_URL>"),
+        os.getenv("COMMUNITY_IMAGE_MODEL", "<fallback:ARK_IMAGE_MODEL>"),
     )
     return app
 

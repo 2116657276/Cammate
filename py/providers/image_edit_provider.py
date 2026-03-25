@@ -25,23 +25,25 @@ class RetouchResult:
 
 
 class DoubaoImageEditProvider:
-    def __init__(self) -> None:
+    def __init__(self, config_prefix: str = "ARK_IMAGE", fallback_prefix: str | None = None) -> None:
         load_runtime_env()
-        self.api_url = os.getenv(
-            "ARK_IMAGE_API_URL",
+        self.config_prefix = config_prefix.strip().upper()
+        self.fallback_prefix = fallback_prefix.strip().upper() if fallback_prefix else None
+        self.api_url = self._cfg_str(
+            "API_URL",
             "https://ark.cn-beijing.volces.com/api/v3/images/generations",
         )
-        self.api_key = os.getenv("ARK_IMAGE_API_KEY", "").strip()
-        self.model = os.getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-260128").strip()
-        self.timeout_sec = self._env_float("ARK_IMAGE_TIMEOUT_SEC", 75.0, 10.0, 180.0)
-        self.size = os.getenv("ARK_IMAGE_SIZE", "2K").strip() or "2K"
-        self.response_format = self._env_choice("ARK_IMAGE_RESPONSE_FORMAT", "url", {"url", "b64_json"})
-        self.sequential = self._env_choice("ARK_IMAGE_SEQUENTIAL", "disabled", {"enabled", "disabled"})
-        self.watermark = self._env_bool("ARK_IMAGE_WATERMARK", True)
-        self.stream = self._env_bool("ARK_IMAGE_STREAM", False)
-        self.max_input_side = self._env_int("ARK_IMAGE_MAX_INPUT_SIDE", 2048, 1024, 4096)
-        self.jpeg_quality = self._env_int("ARK_IMAGE_JPEG_QUALITY", 94, 70, 98)
-        self.portrait_strength_floor = self._env_float("ARK_IMAGE_PORTRAIT_MIN_STRENGTH", 0.48, 0.20, 0.80)
+        self.api_key = self._cfg_str("API_KEY", "")
+        self.model = self._cfg_str("MODEL", "doubao-seedream-5-0-260128")
+        self.timeout_sec = self._env_float("TIMEOUT_SEC", 75.0, 10.0, 180.0)
+        self.size = self._cfg_str("SIZE", "2K")
+        self.response_format = self._env_choice("RESPONSE_FORMAT", "url", {"url", "b64_json"})
+        self.sequential = self._env_choice("SEQUENTIAL", "disabled", {"enabled", "disabled"})
+        self.watermark = self._env_bool("WATERMARK", True)
+        self.stream = self._env_bool("STREAM", False)
+        self.max_input_side = self._env_int("MAX_INPUT_SIDE", 2048, 1024, 4096)
+        self.jpeg_quality = self._env_int("JPEG_QUALITY", 94, 70, 98)
+        self.portrait_strength_floor = self._env_float("PORTRAIT_MIN_STRENGTH", 0.48, 0.20, 0.80)
 
     async def retouch(
         self,
@@ -403,23 +405,41 @@ class DoubaoImageEditProvider:
                 return value
         return "-"
 
-    def _env_choice(self, key: str, default: str, allowed: set[str]) -> str:
+    def _cfg_raw(self, suffix: str) -> str | None:
+        key = f"{self.config_prefix}_{suffix}"
         raw = os.getenv(key)
+        if raw is not None and raw.strip():
+            return raw.strip()
+        if self.fallback_prefix:
+            fallback_key = f"{self.fallback_prefix}_{suffix}"
+            fallback_raw = os.getenv(fallback_key)
+            if fallback_raw is not None and fallback_raw.strip():
+                return fallback_raw.strip()
+        return None
+
+    def _cfg_str(self, suffix: str, default: str) -> str:
+        raw = self._cfg_raw(suffix)
         if raw is None:
             return default
-        value = raw.strip().lower()
+        return raw.strip() or default
+
+    def _env_choice(self, suffix: str, default: str, allowed: set[str]) -> str:
+        raw = self._cfg_raw(suffix)
+        if raw is None:
+            return default
+        value = raw.lower()
         if value in allowed:
             return value
         return default
 
-    def _env_bool(self, key: str, default: bool) -> bool:
-        raw = os.getenv(key)
+    def _env_bool(self, suffix: str, default: bool) -> bool:
+        raw = self._cfg_raw(suffix)
         if raw is None:
             return default
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return raw.lower() in {"1", "true", "yes", "on"}
 
-    def _env_int(self, key: str, default: int, min_value: int, max_value: int) -> int:
-        raw = os.getenv(key)
+    def _env_int(self, suffix: str, default: int, min_value: int, max_value: int) -> int:
+        raw = self._cfg_raw(suffix)
         if raw is None:
             return default
         try:
@@ -428,8 +448,8 @@ class DoubaoImageEditProvider:
             return default
         return max(min_value, min(max_value, value))
 
-    def _env_float(self, key: str, default: float, min_value: float, max_value: float) -> float:
-        raw = os.getenv(key)
+    def _env_float(self, suffix: str, default: float, min_value: float, max_value: float) -> float:
+        raw = self._cfg_raw(suffix)
         if raw is None:
             return default
         try:

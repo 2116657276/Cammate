@@ -29,6 +29,7 @@ class FeedbackApiClient(
         tipText: String,
         photoUri: String?,
         isRetouch: Boolean,
+        reviewText: String,
         sessionMeta: JsonElement,
     ): Int = withContext(Dispatchers.IO) {
         val requestId = newRequestId("feedback")
@@ -38,6 +39,7 @@ class FeedbackApiClient(
             put("tip_text", JsonPrimitive(tipText))
             if (!photoUri.isNullOrBlank()) put("photo_uri", JsonPrimitive(photoUri))
             put("is_retouch", JsonPrimitive(isRetouch))
+            put("review_text", JsonPrimitive(reviewText.take(280)))
             put("session_meta", sessionMeta)
         }.toString()
 

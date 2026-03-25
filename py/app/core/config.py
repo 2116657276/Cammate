@@ -64,11 +64,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    return value if value else default
+
+
+def _env_csv(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    parts = [item.strip().lower() for item in raw.split(",")]
+    return [item for item in parts if item]
+
+
 @dataclass(frozen=True)
 class Settings:
     db_path: Path
     session_ttl_sec: int
     pbkdf2_rounds: int
+    community_upload_dir: Path
+    community_blocked_words: list[str]
+    community_upload_max_side: int
+    community_recommend_limit_default: int
 
 
 load_runtime_env()
@@ -77,4 +95,13 @@ SETTINGS = Settings(
     db_path=Path(os.getenv("APP_DB_PATH", Path(__file__).resolve().parents[2] / "app_data.db")),
     session_ttl_sec=max(300, _env_int("SESSION_TTL_SEC", 604800)),
     pbkdf2_rounds=max(60000, _env_int("PBKDF2_ROUNDS", 120000)),
+    community_upload_dir=Path(
+        _env_str(
+            "COMMUNITY_UPLOAD_DIR",
+            str(Path(__file__).resolve().parents[2] / "uploads" / "community"),
+        )
+    ),
+    community_blocked_words=_env_csv("COMMUNITY_BLOCKED_WORDS", "广告,引流,加微信"),
+    community_upload_max_side=max(720, min(_env_int("COMMUNITY_UPLOAD_MAX_SIDE", 1920), 4096)),
+    community_recommend_limit_default=max(3, min(_env_int("COMMUNITY_RECOMMEND_LIMIT_DEFAULT", 12), 48)),
 )
