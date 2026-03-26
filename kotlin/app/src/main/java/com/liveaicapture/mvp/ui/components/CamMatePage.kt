@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +40,9 @@ import androidx.compose.ui.unit.dp
 fun CamMatePage(
     title: String,
     onBack: (() -> Unit)? = null,
+    backText: String = "返回",
+    topActionText: String? = null,
+    onTopAction: (() -> Unit)? = null,
     subtitle: String? = null,
     content: LazyListScope.() -> Unit,
 ) {
@@ -51,8 +55,8 @@ fun CamMatePage(
                 .background(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            Color(0x66352C1E),
-                            Color(0x33111722),
+                            Color(0xFFFFFAF0),
+                            Color(0xFFEFF4FB),
                             MaterialTheme.colorScheme.background,
                         ),
                     ),
@@ -72,7 +76,8 @@ fun CamMatePage(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(top = 14.dp, bottom = 6.dp),
+                                .statusBarsPadding()
+                                .padding(top = 8.dp, bottom = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             Row(
@@ -85,9 +90,19 @@ fun CamMatePage(
                                     style = MaterialTheme.typography.titleLarge,
                                     color = MaterialTheme.colorScheme.onBackground,
                                 )
-                                if (onBack != null) {
-                                    TextButton(onClick = onBack) {
-                                        Text("返回")
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    if (onTopAction != null && !topActionText.isNullOrBlank()) {
+                                        TextButton(onClick = onTopAction) {
+                                            Text(topActionText)
+                                        }
+                                    }
+                                    if (onBack != null) {
+                                        TextButton(onClick = onBack) {
+                                            Text(backText)
+                                        }
                                     }
                                 }
                             }
@@ -113,11 +128,11 @@ fun SectionCard(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
-    val cardAlpha by animateFloatAsState(targetValue = 0.92f, label = "cardAlpha")
+    val cardAlpha by animateFloatAsState(targetValue = 0.97f, label = "cardAlpha")
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .shadow(10.dp, RoundedCornerShape(20.dp)),
+            .shadow(6.dp, RoundedCornerShape(20.dp)),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = cardAlpha),
@@ -128,7 +143,7 @@ fun SectionCard(
             modifier = Modifier
                 .border(
                     width = 1.dp,
-                    color = Color(0x33F3DAB1),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
                     shape = RoundedCornerShape(20.dp),
                 )
                 .padding(14.dp),

@@ -1,44 +1,54 @@
 package com.liveaicapture.mvp.ui.theme
 
 import androidx.compose.material3.Typography
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.liveaicapture.mvp.R
+
+private val CamMateSerif = FontFamily(
+    Font(R.font.noto_serif_sc_variable, weight = FontWeight.Normal),
+    Font(R.font.noto_serif_sc_variable, weight = FontWeight.Medium),
+    Font(R.font.noto_serif_sc_variable, weight = FontWeight.SemiBold),
+    Font(R.font.noto_serif_sc_variable, weight = FontWeight.Bold),
+    Font(R.font.noto_serif_sc_variable, weight = FontWeight.ExtraBold),
+)
 
 val Typography = Typography(
     headlineLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.ExtraBold,
         fontSize = 34.sp,
         lineHeight = 40.sp,
     ),
     titleLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 24.sp,
         lineHeight = 30.sp,
     ),
     titleMedium = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 18.sp,
         lineHeight = 24.sp,
     ),
     bodyLarge = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.Normal,
         fontSize = 16.sp,
         lineHeight = 24.sp,
     ),
     bodyMedium = TextStyle(
-        fontFamily = FontFamily.SansSerif,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.Normal,
         fontSize = 14.sp,
         lineHeight = 21.sp,
     ),
     bodySmall = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = CamMateSerif,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 18.sp,

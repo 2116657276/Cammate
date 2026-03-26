@@ -21,6 +21,7 @@ import androidx.navigation.compose.rememberNavController
 import com.liveaicapture.mvp.ui.CameraScreen
 import com.liveaicapture.mvp.ui.CommunityScreen
 import com.liveaicapture.mvp.ui.FeedbackScreen
+import com.liveaicapture.mvp.ui.HomeScreen
 import com.liveaicapture.mvp.ui.LoginScreen
 import com.liveaicapture.mvp.ui.MainViewModel
 import com.liveaicapture.mvp.ui.RegisterScreen
@@ -47,13 +48,19 @@ fun CamMateApp() {
     val authState by vm.authUiState.collectAsStateWithLifecycle()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    val openCommunity: () -> Unit = {
+        navController.navigate("community") {
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
 
     LaunchedEffect(authState.checkingSession, authState.authenticated, currentRoute) {
         if (authState.checkingSession) return@LaunchedEffect
         val route = currentRoute ?: return@LaunchedEffect
 
         if (route == "splash") {
-            val target = if (authState.authenticated) "camera" else "login"
+            val target = if (authState.authenticated) "home" else "login"
             navController.navigate(target) {
                 popUpTo("splash") { inclusive = true }
                 launchSingleTop = true
@@ -63,7 +70,7 @@ fun CamMateApp() {
 
         val authPages = setOf("login", "register")
         if (authState.authenticated && route in authPages) {
-            navController.navigate("camera") {
+            navController.navigate("home") {
                 popUpTo("login") { inclusive = true }
                 launchSingleTop = true
             }
@@ -97,6 +104,14 @@ fun CamMateApp() {
                 onBackToLogin = { navController.popBackStack() },
             )
         }
+        composable("home") {
+            HomeScreen(
+                viewModel = vm,
+                openCamera = { navController.navigate("camera") },
+                openCommunity = openCommunity,
+                openSettings = { navController.navigate("settings") },
+            )
+        }
         composable("camera") {
             CameraScreen(
                 viewModel = vm,
@@ -108,7 +123,7 @@ fun CamMateApp() {
                     }
                 },
                 openFeedback = { navController.navigate("feedback") },
-                openCommunity = { navController.navigate("community") },
+                openCommunity = openCommunity,
             )
         }
         composable("settings") {
@@ -116,7 +131,7 @@ fun CamMateApp() {
                 viewModel = vm,
                 onBack = {
                     if (!navController.popBackStack()) {
-                        navController.navigate("camera") {
+                        navController.navigate("home") {
                             launchSingleTop = true
                         }
                     }
@@ -151,7 +166,16 @@ fun CamMateApp() {
         composable("community") {
             CommunityScreen(
                 viewModel = vm,
-                onBack = { navController.popBackStack() },
+                onBack = {
+                    navController.navigate("home") {
+                        popUpTo("home") { inclusive = false }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                },
+                onLogout = {
+                    vm.logout()
+                },
             )
         }
     }

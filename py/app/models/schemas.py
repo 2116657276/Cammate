@@ -109,16 +109,55 @@ class CommunityPublishRequest(BaseModel):
     scene_type: Literal["portrait", "general", "landscape", "food", "night"] = "general"
 
 
+class CommunityDirectPublishRequest(BaseModel):
+    image_base64: str = Field(min_length=16)
+    place_tag: str = Field(min_length=1, max_length=48)
+    scene_type: Literal["portrait", "general", "landscape", "food", "night"] = "general"
+    caption: str = Field(default="", max_length=280)
+    review_text: str = Field(default="", max_length=280)
+    rating: int | None = Field(default=None, ge=1, le=5)
+    post_type: Literal["normal", "relay"] = "normal"
+    relay_parent_post_id: int | None = Field(default=None, ge=1)
+    style_template_post_id: int | None = Field(default=None, ge=1)
+
+
+class CommunityRelayPublishRequest(BaseModel):
+    image_base64: str = Field(min_length=16)
+    place_tag: str = Field(min_length=1, max_length=48)
+    scene_type: Literal["portrait", "general", "landscape", "food", "night"] = "general"
+    caption: str = Field(default="", max_length=280)
+    review_text: str = Field(default="", max_length=280)
+    rating: int | None = Field(default=None, ge=1, le=5)
+    relay_parent_post_id: int = Field(ge=1)
+    style_template_post_id: int | None = Field(default=None, ge=1)
+
+
+class CommunityRelayParentSummary(BaseModel):
+    id: int
+    user_nickname: str
+    place_tag: str
+    scene_type: str
+    image_url: str
+
+
 class CommunityPostView(BaseModel):
     id: int
     user_id: int
     user_nickname: str
-    feedback_id: int
+    feedback_id: int | None = None
     image_url: str
     scene_type: str
     place_tag: str
-    rating: int
+    rating: int = Field(default=0, ge=0, le=5)
     review_text: str
+    caption: str = ""
+    post_type: Literal["normal", "relay"] = "normal"
+    source_type: Literal["feedback_flow", "direct"] = "feedback_flow"
+    like_count: int = Field(default=0, ge=0)
+    comment_count: int = Field(default=0, ge=0)
+    liked_by_me: bool = False
+    style_template_post_id: int | None = None
+    relay_parent_summary: CommunityRelayParentSummary | None = None
     created_at: int
 
 
@@ -147,6 +186,93 @@ class CommunityComposeResponse(BaseModel):
     composed_image_base64: str
     provider: str
     model: str
+    implementation_status: Literal["ready", "placeholder"] = "ready"
+    compare_input_base64: str | None = None
+    placeholder_notes: list[str] = Field(default_factory=list)
+
+
+class CommunityCocreateComposeRequest(BaseModel):
+    reference_post_id: int = Field(ge=1)
+    person_a_image_base64: str = Field(min_length=16)
+    person_b_image_base64: str = Field(min_length=16)
+    strength: float = Field(default=0.45, ge=0.0, le=1.0)
+
+
+class CommunityCocreateComposeResponse(BaseModel):
+    composed_image_base64: str
+    provider: str
+    model: str
+    implementation_status: Literal["ready", "placeholder"] = "ready"
+    compare_input_base64: str | None = None
+    placeholder_notes: list[str] = Field(default_factory=list)
+
+
+class CommunityCreativeJobView(BaseModel):
+    job_id: int
+    job_type: Literal["compose", "cocreate", "remake_guide"]
+    status: Literal["queued", "running", "success", "failed", "canceled"]
+    progress: int = Field(ge=0, le=100)
+    priority: int = Field(default=100, ge=1, le=999)
+    retry_count: int = Field(default=0, ge=0)
+    max_retries: int = Field(default=0, ge=0)
+    next_retry_at: int | None = None
+    started_at: int | None = None
+    heartbeat_at: int | None = None
+    lease_expires_at: int | None = None
+    cancel_reason: str = ""
+    implementation_status: Literal["ready", "placeholder"] = "ready"
+    provider: str = ""
+    model: str = ""
+    composed_image_base64: str | None = None
+    compare_input_base64: str | None = None
+    placeholder_notes: list[str] = Field(default_factory=list)
+    error_message: str = ""
+    request_id: str = ""
+    created_at: int
+    updated_at: int
+    finished_at: int | None = None
+
+
+class CommunityLikeResponse(BaseModel):
+    post_id: int
+    liked: bool
+    like_count: int = Field(ge=0)
+
+
+class CommunityCommentCreateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=280)
+
+
+class CommunityCommentView(BaseModel):
+    id: int
+    post_id: int
+    user_id: int
+    user_nickname: str
+    text: str
+    created_at: int
+    can_delete: bool = False
+
+
+class CommunityCommentsResponse(BaseModel):
+    items: list[CommunityCommentView]
+    next_offset: int = 0
+    has_more: bool = False
+
+
+class CommunityDeleteResponse(BaseModel):
+    ok: bool
+
+
+class CommunityRemakeGuideRequest(BaseModel):
+    template_post_id: int = Field(ge=1)
+
+
+class CommunityRemakeGuideResponse(BaseModel):
+    template_post: CommunityPostView
+    shot_script: list[str]
+    camera_hint: str
+    implementation_status: Literal["ready", "placeholder"] = "ready"
+    placeholder_notes: list[str] = Field(default_factory=list)
 
 
 @dataclass

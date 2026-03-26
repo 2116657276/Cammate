@@ -16,7 +16,7 @@
 
 ### 1.2 最终版体验目标
 
-- UI：电影感深色玻璃风，统一视觉系统、动效、层级和交互语言
+- UI：高级浅色玻璃风，统一视觉系统、动效、层级和交互语言
 - 社区：拍摄后评分页可选一键发布，形成内容增长飞轮
 - 推荐：基于地点与风景类型返回可解释推荐结果
 - 融合：用户上传半身/全身照，选参考图后一键生成融合图
@@ -26,7 +26,7 @@
 ### 2.1 客户端最终能力
 
 - 全局 UI 重构：
-  - 深色电影感主题
+  - 浅色高级主题
   - 玻璃卡片/渐变背景
   - 统一圆角、阴影与字体系
   - 页面入场、卡片错峰、按钮状态过渡
@@ -95,6 +95,9 @@
   - 新增：`review_text`
 - `POST /community/posts`
   - 入参：`feedback_id + image_base64 + place_tag + scene_type`
+- `POST /community/posts/direct`
+  - 入参：`image_base64 + place_tag + scene_type (+ caption/review/rating 可选)`
+  - 说明：主动发布不强依赖 `feedback_id`
 - `GET /community/feed?offset&limit`
 - `GET /community/recommendations?place_tag&scene_type&limit`
   - 返回：`score`、`reason`
@@ -202,7 +205,7 @@ CREATE TABLE feedback (
 CREATE TABLE community_posts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id BIGINT UNSIGNED NOT NULL,
-  feedback_id BIGINT UNSIGNED NOT NULL,
+  feedback_id BIGINT UNSIGNED NULL,
   scene_type VARCHAR(24) NOT NULL,
   place_tag VARCHAR(64) NOT NULL,
   rating_snapshot TINYINT UNSIGNED NOT NULL,
@@ -213,7 +216,7 @@ CREATE TABLE community_posts (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
-  UNIQUE KEY uk_post_feedback (feedback_id),
+  KEY idx_post_feedback (feedback_id),
   KEY idx_post_scene_place_published (scene_type, place_tag, published_at DESC),
   KEY idx_post_published (published_at DESC),
   KEY idx_post_status_visibility (moderation_status, visibility),
@@ -222,7 +225,7 @@ CREATE TABLE community_posts (
     ON DELETE CASCADE ON UPDATE RESTRICT,
   CONSTRAINT fk_post_feedback
     FOREIGN KEY (feedback_id) REFERENCES feedback(id)
-    ON DELETE RESTRICT ON UPDATE RESTRICT,
+    ON DELETE SET NULL ON UPDATE RESTRICT,
   CONSTRAINT chk_post_rating CHECK (rating_snapshot BETWEEN 1 AND 5)
 ) ENGINE=InnoDB;
 
@@ -334,33 +337,53 @@ LIMIT :limit;
 4. 校验总量与抽样内容
 5. 切换读流量并观察错误率与慢查询
 
-## 7. 未来补充（Roadmap）
+## 7. 计划中 / 未实现功能（Roadmap）
 
-### 7.1 V1.1（近期）
+本节只列“尚未完成或正在规划”的能力，便于和开发文档区分。
 
-- 姿势推荐维度（站姿、构图姿势标签）
-- 推荐理由模板细化（更可解释）
-- 社区内容举报入口
+### 7.1 当前未完成项（截至 2026-03-26）
 
-### 7.2 V1.2（中期）
+- 创意任务仍是“进程内 worker + SQLite”轻量架构，未引入外部队列与独立调度器
+- 运行中任务仍为软取消（无法强制中断外部 AI 请求）
+- 同款复刻的人体关键点匹配与实时姿态纠偏
+- 双人共创精细遮罩与几何一致性增强
+- 姿势维度推荐（当前推荐以地点/场景为主）
+- 社区举报和多级审核后台
+- 对象存储替换本地文件（当前为本地文件路径）
 
-- 融合任务异步化：
-  - 提交任务接口
-  - 轮询任务状态
-  - 失败重试与任务过期清理
-- 对象存储替换本地文件（S3/OSS/COS）
+### 7.2 迭代优先顺序（按用户价值）
 
-### 7.3 V1.3（中长期）
+1. `P0` 稳定体验层  
+   创意任务从“轻量稳定”继续升级到“可运维稳定”（队列外置、可观测性细化）
+2. `P1` 复刻质量层  
+   同款复刻加入姿态/构图实时纠偏（关键点匹配）
+3. `P2` 共创质量层  
+   双人共创精细遮罩、边缘质量和双人透视一致性
+4. `P3` 社区增长层  
+   接力活动化、榜单、举报审核与个性化推荐权重
+
+### 7.3 V1.2（已落地重点 + 收尾）
+
+- 已落地：
+  - `creative_jobs` 任务化链路（创建/轮询/重试/取消）
+  - 轻量调度字段：`priority/started_at/heartbeat_at/lease_expires_at/cancel_reason`
+  - 超时与租约恢复：遗留 `running` 任务自动纠正并重试/失败
+  - `healthz` 增加 `creative_queue` 诊断指标
+  - 客户端移除断网本地 mock 动态注入，社区流以服务端数据为准
+- 收尾项：
+  - 结果存储从 `base64` 向对象存储迁移（S3/OSS/COS）
+
+### 7.4 V1.3（中长期目标）
 
 - 多级审核：
   - 文本审核
   - 图像审核
   - 风险分级与自动下线
 - 推荐系统升级：
-  - 加入个性化权重
-  - 加入互动信号（收藏/点赞/停留）
+  - 个性化权重
+  - 互动信号（点赞/评论/停留）
 
-### 7.4 V2（远期）
+### 7.5 V2（远期）
 
 - 跨设备素材同步
 - 作品编辑历史与版本管理

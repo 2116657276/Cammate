@@ -78,6 +78,23 @@ def _env_csv(name: str, default: str = "") -> list[str]:
     return [item for item in parts if item]
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _default_community_seed_enabled() -> bool:
+    app_env = os.getenv("APP_ENV", "development").strip().lower()
+    return app_env not in {"prod", "production"}
+
+
 @dataclass(frozen=True)
 class Settings:
     db_path: Path
@@ -87,6 +104,11 @@ class Settings:
     community_blocked_words: list[str]
     community_upload_max_side: int
     community_recommend_limit_default: int
+    community_seed_enabled: bool
+    community_seed_count: int
+    community_creative_worker_count: int
+    community_creative_max_retries: int
+    community_creative_retry_base_sec: int
 
 
 load_runtime_env()
@@ -104,4 +126,10 @@ SETTINGS = Settings(
     community_blocked_words=_env_csv("COMMUNITY_BLOCKED_WORDS", "广告,引流,加微信"),
     community_upload_max_side=max(720, min(_env_int("COMMUNITY_UPLOAD_MAX_SIDE", 1920), 4096)),
     community_recommend_limit_default=max(3, min(_env_int("COMMUNITY_RECOMMEND_LIMIT_DEFAULT", 12), 48)),
+    # 开发阶段默认启用社区假数据；若 APP_ENV=production 默认关闭，可显式覆盖。
+    community_seed_enabled=_env_bool("COMMUNITY_SEED_ENABLED", _default_community_seed_enabled()),
+    community_seed_count=max(0, min(_env_int("COMMUNITY_SEED_COUNT", 18), 60)),
+    community_creative_worker_count=max(1, min(_env_int("COMMUNITY_CREATIVE_WORKER_COUNT", 2), 8)),
+    community_creative_max_retries=max(0, min(_env_int("COMMUNITY_CREATIVE_MAX_RETRIES", 2), 5)),
+    community_creative_retry_base_sec=max(1, min(_env_int("COMMUNITY_CREATIVE_RETRY_BASE_SEC", 2), 20)),
 )

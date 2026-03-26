@@ -30,7 +30,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.liveaicapture.mvp.ui.components.CamMatePage
 import com.liveaicapture.mvp.ui.components.SectionCard
 
-private val publishSceneOptions = listOf("general", "portrait", "landscape", "food", "night")
+private data class PublishSceneOption(
+    val raw: String,
+    val label: String,
+)
+
+private val publishSceneOptions = listOf(
+    PublishSceneOption(raw = "general", label = "通用"),
+    PublishSceneOption(raw = "portrait", label = "人像"),
+    PublishSceneOption(raw = "landscape", label = "风景"),
+    PublishSceneOption(raw = "food", label = "美食"),
+    PublishSceneOption(raw = "night", label = "夜景"),
+)
 
 @Composable
 fun FeedbackScreen(
@@ -150,9 +161,9 @@ fun FeedbackScreen(
                     ) {
                         publishSceneOptions.forEach { scene ->
                             FilterChip(
-                                selected = state.publishSceneType == scene,
-                                onClick = { viewModel.updateFeedbackPublishSceneType(scene) },
-                                label = { Text(scene) },
+                                selected = state.publishSceneType == scene.raw,
+                                onClick = { viewModel.updateFeedbackPublishSceneType(scene.raw) },
+                                label = { Text(scene.label) },
                             )
                         }
                     }

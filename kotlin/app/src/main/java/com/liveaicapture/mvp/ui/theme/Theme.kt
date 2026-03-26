@@ -7,13 +7,16 @@ import androidx.compose.ui.graphics.Color
 
 private val CamMateLightColors = lightColorScheme(
     primary = CamPrimary,
-    onPrimary = Color(0xFF1E1A14),
-    secondary = CamTextSecondary,
-    onSecondary = CamText,
+    onPrimary = Color.White,
+    secondary = Color(0xFF536A7A),
+    onSecondary = Color.White,
     background = CamBg,
     onBackground = CamText,
     surface = CamSurface,
     onSurface = CamText,
+    surfaceVariant = CamSurfaceSoft,
+    onSurfaceVariant = CamTextSecondary,
+    outline = CamBorder,
     error = CamDanger,
 )
 

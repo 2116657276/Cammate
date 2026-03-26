@@ -19,6 +19,7 @@ from app.api.routes.scene import router as scene_router
 from app.core.database import ensure_db
 from app.core.logging import request_id_ctx_var
 from app.core.logging import setup_logging
+from app.services import community_service
 from providers.factory import close_provider
 setup_logging()
 logger = logging.getLogger("app.api")
@@ -63,6 +64,10 @@ def create_app() -> FastAPI:
     async def close_runtime_resources() -> None:
         await close_provider()
 
+    @app.on_event("startup")
+    async def startup_runtime_resources() -> None:
+        community_service.bootstrap_creative_runtime()
+
     has_ark_key = bool(os.getenv("ARK_API_KEY", "").strip() or os.getenv("EXTERNAL_VISION_API_KEY", "").strip())
     logger.info(
         "startup.config AI_PROVIDER=%s ARK_API_KEY_present=%s ARK_MODEL=%s ARK_API_URL=%s ARK_CHAT_API_URL=%s ARK_REASONING_EFFORT=%s ARK_TRUST_ENV=%s ARK_MAX_OUTPUT_TOKENS=%s EXTERNAL_TIMEOUT_SEC=%s APP_LOG_LEVEL=%s APP_LOG_DIR=%s ENV_FILES=%s",
@@ -80,13 +85,18 @@ def create_app() -> FastAPI:
         os.getenv("APP_CONFIG_LOADED_ENV_FILES", "<none>"),
     )
     logger.info(
-        "startup.community COMMUNITY_UPLOAD_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s",
+        "startup.community COMMUNITY_UPLOAD_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s COMMUNITY_SEED_ENABLED=%s COMMUNITY_SEED_COUNT=%s COMMUNITY_CREATIVE_WORKER_COUNT=%s COMMUNITY_CREATIVE_MAX_RETRIES=%s COMMUNITY_CREATIVE_RETRY_BASE_SEC=%s",
         os.getenv("COMMUNITY_UPLOAD_DIR", "<project>/uploads/community"),
         os.getenv("COMMUNITY_UPLOAD_MAX_SIDE", "1920"),
         os.getenv("COMMUNITY_RECOMMEND_LIMIT_DEFAULT", "12"),
         os.getenv("COMMUNITY_BLOCKED_WORDS", "广告,引流,加微信"),
         os.getenv("COMMUNITY_IMAGE_API_URL", "<fallback:ARK_IMAGE_API_URL>"),
         os.getenv("COMMUNITY_IMAGE_MODEL", "<fallback:ARK_IMAGE_MODEL>"),
+        os.getenv("COMMUNITY_SEED_ENABLED", "true"),
+        os.getenv("COMMUNITY_SEED_COUNT", "18"),
+        os.getenv("COMMUNITY_CREATIVE_WORKER_COUNT", "2"),
+        os.getenv("COMMUNITY_CREATIVE_MAX_RETRIES", "2"),
+        os.getenv("COMMUNITY_CREATIVE_RETRY_BASE_SEC", "2"),
     )
     return app
 

@@ -1,7 +1,11 @@
 # Cammate
 
 Android + FastAPI 的 AI 拍摄应用。当前代码已经覆盖：
-`登录/注册 -> 场景识别 -> AI 构图建议 -> 拍照 -> AI 修图 -> 评分反馈 -> 可选发布社区 -> 社区推荐 -> AI 融合`
+`登录/注册 -> 场景识别 -> AI 构图建议 -> 拍照 -> AI 修图 -> 评分反馈 -> 可选发布社区 -> 社区主动发布 -> 社区互动 -> 社区推荐 -> AI 融合/双人共创`
+
+发布链路说明（当前实现）：
+- 评分后发布：帖子关联 `feedback_id`
+- 社区主动发布：不强依赖 `feedback_id`（可为空）
 
 ## 文档分层（主文档三类）
 
@@ -49,10 +53,30 @@ curl http://127.0.0.1:8000/healthz
 - `POST /retouch`
 - `POST /feedback`（支持 `review_text`）
 - `POST /community/posts`
+- `POST /community/posts/direct`
+- `POST /community/relay/posts`
 - `GET /community/feed`
 - `GET /community/recommendations`
 - `GET /community/posts/{post_id}/image`
+- `POST /community/posts/{post_id}/likes`
+- `DELETE /community/posts/{post_id}/likes`
+- `GET /community/posts/{post_id}/comments?offset&limit`
+- `POST /community/posts/{post_id}/comments`
+- `DELETE /community/comments/{comment_id}`
+- `POST /community/remake/guide`
 - `POST /community/compose`
+- `POST /community/compose/jobs`
+- `POST /community/cocreate/compose`
+- `POST /community/cocreate/jobs`
+- `GET /community/jobs/{job_id}`
+- `POST /community/jobs/{job_id}/retry`
+- `POST /community/jobs/{job_id}/cancel`
+
+稳定性增强（V1.2）：
+
+- 社区流仅展示服务端真实数据（客户端不再在失败时注入本地 mock 帖子）
+- 创意任务新增轻量调度字段：`priority/started_at/heartbeat_at/lease_expires_at/cancel_reason`
+- `GET /healthz` 返回 `creative_queue` 指标（`queued/running/failed_recent/workers`）
 
 ## 配置说明（简版）
 
@@ -62,5 +86,8 @@ curl http://127.0.0.1:8000/healthz
 - 修图：`ARK_IMAGE_*`
 - 社区：`COMMUNITY_*`
 - 社区图像模型可选覆盖：`COMMUNITY_IMAGE_*`（未配置时回退到 `ARK_IMAGE_*`）
+- 社区创意任务并发：`COMMUNITY_CREATIVE_WORKER_COUNT`
+- 社区创意任务重试：`COMMUNITY_CREATIVE_MAX_RETRIES` / `COMMUNITY_CREATIVE_RETRY_BASE_SEC`
+- 社区假数据：开发默认开启；`APP_ENV=production` 默认关闭，可用 `COMMUNITY_SEED_ENABLED` 覆盖
 
 详细配置、当前实现细节见 [`DEVELOPMENT.md`](./DEVELOPMENT.md)；最终目标配置规范见 [`DESIGN.md`](./DESIGN.md)。

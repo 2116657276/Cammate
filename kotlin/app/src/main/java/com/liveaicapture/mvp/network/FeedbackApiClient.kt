@@ -14,9 +14,15 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 class FeedbackApiClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder().build(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS)
+        .build(),
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val requestMediaType = "application/json; charset=utf-8".toMediaType()
