@@ -7,11 +7,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.core.config import load_runtime_env
 from app.vision.models import BoxCandidate
 
 
 class YunetFaceDetector:
     def __init__(self) -> None:
+        load_runtime_env()
         self._ready = False
         self._lock = threading.Lock()
 
@@ -37,6 +39,9 @@ class YunetFaceDetector:
             self._ready = self._detector is not None
         except Exception:
             self._ready = False
+
+    def is_ready(self) -> bool:
+        return bool(self._ready)
 
     def detect_faces(self, image_bytes: bytes) -> list[BoxCandidate]:
         if not self._ready:
@@ -122,4 +127,3 @@ class YunetFaceDetector:
         except Exception:
             return default
         return max(min_value, min(max_value, value))
-

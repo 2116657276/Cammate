@@ -134,10 +134,20 @@ def ensure_db() -> None:
                 request_payload TEXT NOT NULL DEFAULT '{}',
                 result_meta TEXT NOT NULL DEFAULT '{}',
                 result_image_base64 TEXT,
+                result_image_path TEXT NOT NULL DEFAULT '',
+                result_storage_provider TEXT NOT NULL DEFAULT '',
+                result_storage_key TEXT NOT NULL DEFAULT '',
                 compare_input_base64 TEXT,
+                compare_input_path TEXT NOT NULL DEFAULT '',
+                compare_storage_provider TEXT NOT NULL DEFAULT '',
+                compare_storage_key TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT '',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                sha256 TEXT NOT NULL DEFAULT '',
                 provider TEXT NOT NULL DEFAULT '',
                 model TEXT NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
+                error_code TEXT NOT NULL DEFAULT '',
                 request_id TEXT NOT NULL DEFAULT '',
                 placeholder_notes TEXT NOT NULL DEFAULT '[]',
                 created_at INTEGER NOT NULL,
@@ -149,6 +159,54 @@ def ensure_db() -> None:
             """
         )
         _ensure_community_creative_jobs_columns(conn)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS community_creative_job_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES community_creative_jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS community_post_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                signal_type TEXT NOT NULL,
+                value REAL NOT NULL DEFAULT 1.0,
+                dwell_ms INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(post_id) REFERENCES community_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS community_post_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL,
+                reporter_user_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                detail_text TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                moderation_action TEXT NOT NULL DEFAULT '',
+                resolution_note TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                resolved_by INTEGER,
+                FOREIGN KEY(post_id) REFERENCES community_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY(reporter_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(resolved_by) REFERENCES users(id)
+            )
+            """
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_community_scene_place_created "
             "ON community_posts(scene_type, place_tag, created_at DESC)"
@@ -196,6 +254,34 @@ def ensure_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_community_jobs_status_lease "
             "ON community_creative_jobs(status, lease_expires_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_job_events_job_created "
+            "ON community_creative_job_events(job_id, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_job_events_type_created "
+            "ON community_creative_job_events(event_type, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_post_signals_post_created "
+            "ON community_post_signals(post_id, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_post_signals_user_created "
+            "ON community_post_signals(user_id, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_post_signals_type_created "
+            "ON community_post_signals(signal_type, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_post_reports_status_created "
+            "ON community_post_reports(status, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_post_reports_post_created "
+            "ON community_post_reports(post_id, created_at DESC)"
         )
         conn.commit()
     finally:
@@ -326,14 +412,34 @@ def _ensure_community_creative_jobs_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN cancel_reason TEXT NOT NULL DEFAULT ''")
     if "result_image_base64" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN result_image_base64 TEXT")
+    if "result_image_path" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN result_image_path TEXT NOT NULL DEFAULT ''")
+    if "result_storage_provider" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN result_storage_provider TEXT NOT NULL DEFAULT ''")
+    if "result_storage_key" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN result_storage_key TEXT NOT NULL DEFAULT ''")
     if "compare_input_base64" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN compare_input_base64 TEXT")
+    if "compare_input_path" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN compare_input_path TEXT NOT NULL DEFAULT ''")
+    if "compare_storage_provider" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN compare_storage_provider TEXT NOT NULL DEFAULT ''")
+    if "compare_storage_key" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN compare_storage_key TEXT NOT NULL DEFAULT ''")
+    if "mime_type" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN mime_type TEXT NOT NULL DEFAULT ''")
+    if "file_size" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
+    if "sha256" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''")
     if "provider" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
     if "model" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if "error_message" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+    if "error_code" not in cols:
+        conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN error_code TEXT NOT NULL DEFAULT ''")
     if "request_id" not in cols:
         conn.execute("ALTER TABLE community_creative_jobs ADD COLUMN request_id TEXT NOT NULL DEFAULT ''")
     if "placeholder_notes" not in cols:

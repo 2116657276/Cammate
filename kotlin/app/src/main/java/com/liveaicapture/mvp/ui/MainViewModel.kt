@@ -20,6 +20,7 @@ import com.liveaicapture.mvp.data.CommunityCommentItem
 import com.liveaicapture.mvp.data.CommunityPostItem
 import com.liveaicapture.mvp.data.CommunityRecommendationItem
 import com.liveaicapture.mvp.data.CommunityRelayParentItem
+import com.liveaicapture.mvp.data.CommunityRemakeAnalysis
 import com.liveaicapture.mvp.data.CommunityRemakeGuide
 import com.liveaicapture.mvp.data.CommunityUiState
 import com.liveaicapture.mvp.data.FeedbackUiState
@@ -37,6 +38,7 @@ import com.liveaicapture.mvp.network.CommunityApiClient
 import com.liveaicapture.mvp.network.CommunityCommentDto
 import com.liveaicapture.mvp.network.CommunityCreativeJobDto
 import com.liveaicapture.mvp.network.CommunityPostDto
+import com.liveaicapture.mvp.network.CommunityRemakeAnalysisDto
 import com.liveaicapture.mvp.network.CommunityRemakeGuideDto
 import com.liveaicapture.mvp.network.FeedbackApiClient
 import com.liveaicapture.mvp.network.RetouchApiClient
@@ -1485,10 +1487,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _communityUiState.update {
                 it.copy(
                     loadingFeed = true,
+                    feedHasMore = true,
                     errorMessage = null,
                 )
             }
         } else {
+            if (!_communityUiState.value.feedHasMore) return
             _communityUiState.update { it.copy(loadingFeed = true, errorMessage = null) }
         }
 
@@ -1512,6 +1516,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         loadingFeed = false,
                         feed = mergedFromServer,
+                        feedHasMore = result.hasMore,
                         errorMessage = null,
                     )
                 }
@@ -1797,7 +1802,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _communityUiState.update { it.copy(errorMessage = "请先登录") }
             return
         }
-        _communityUiState.update { it.copy(remakeLoading = true, errorMessage = null) }
+        _communityUiState.update {
+            it.copy(
+                remakeLoading = true,
+                remakeAnalysis = null,
+                errorMessage = null,
+            )
+        }
         viewModelScope.launch {
             try {
                 val guide = communityApiClient.fetchRemakeGuide(
@@ -1833,7 +1844,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 statusText = "同款复刻已加载：${guide.cameraHint}",
-                tipText = guide.shotScript.firstOrNull() ?: it.tipText,
+                tipText = guide.poseHint.ifBlank { guide.shotScript.firstOrNull() ?: it.tipText },
+                remakeTemplatePostId = guide.templatePost.id,
+                remakeTemplateSceneType = guide.templatePost.sceneType,
+                remakeCameraHint = guide.cameraHint,
+                remakePoseHint = guide.poseHint,
+                remakeFramingHint = guide.framingHint,
+                remakeTimingHint = guide.timingHint,
+                remakeAlignmentChecks = guide.alignmentChecks,
             )
         }
         val recommendedMode = when (guide.templatePost.sceneType.lowercase()) {
@@ -1845,7 +1863,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectCommunityReferencePost(postId: Int?) {
-        _communityUiState.update { it.copy(referencePostId = postId, errorMessage = null) }
+        _communityUiState.update {
+            it.copy(
+                referencePostId = postId,
+                remakeGuide = null,
+                remakeAnalysis = null,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun analyzeLatestPhotoForRemake() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val guide = state.remakeGuide
+        if (guide == null) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择参考图并生成姿势推荐") }
+            return
+        }
+        val latestPhotoUri = _uiState.value.lastPhotoUri
+        if (latestPhotoUri.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先完成一张拍摄，再做姿势比对") }
+            return
+        }
+        if (state.remakeAnalyzing) return
+
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    remakeAnalyzing = true,
+                    remakeAnalysis = null,
+                    errorMessage = null,
+                )
+            }
+            try {
+                val candidateBase64 = encodePhotoUriToBase64(latestPhotoUri)
+                val result = communityApiClient.analyzeRemake(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    templatePostId = guide.templatePost.id,
+                    candidateImageBase64 = candidateBase64,
+                ).toCommunityRemakeAnalysis()
+                _communityUiState.update {
+                    it.copy(
+                        remakeAnalyzing = false,
+                        remakeAnalysis = result,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.remake.analyze",
+                    throwable = e,
+                    userHint = "姿势分析失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        remakeAnalyzing = false,
+                        errorMessage = "姿势分析失败，请稍后重试",
+                    )
+                }
+            }
+        }
     }
 
     fun updateCommunityPersonImageUri(uri: String?) {
@@ -2726,6 +2808,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             templatePost = templatePost.toCommunityPost(serverUrl = serverUrl),
             shotScript = shotScript,
             cameraHint = cameraHint,
+            poseHint = poseHint,
+            framingHint = framingHint,
+            timingHint = timingHint,
+            alignmentChecks = alignmentChecks,
+            implementationStatus = implementationStatus,
+            placeholderNotes = placeholderNotes,
+        )
+    }
+
+    private fun CommunityRemakeAnalysisDto.toCommunityRemakeAnalysis(): CommunityRemakeAnalysis {
+        return CommunityRemakeAnalysis(
+            templatePostId = templatePostId,
+            poseScore = poseScore.coerceIn(0f, 1f),
+            framingScore = framingScore.coerceIn(0f, 1f),
+            alignmentScore = alignmentScore.coerceIn(0f, 1f),
+            mismatchHints = mismatchHints,
             implementationStatus = implementationStatus,
             placeholderNotes = placeholderNotes,
         )

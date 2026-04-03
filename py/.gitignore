@@ -15,6 +15,11 @@ app_data.db-wal
 app_data.db-shm
 uploads/
 logs/
+creative_results/
+!demo_app_data.db
+!demo_assets/
+!demo_assets/community_seed/
+!demo_assets/community_seed/**
 
 # Local env/config.
 .env

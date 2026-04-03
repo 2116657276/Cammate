@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
+from app.api.deps import require_admin
 from app.api.deps import require_user
 from app.models.schemas import (
     AuthUser,
@@ -17,9 +18,14 @@ from app.models.schemas import (
     CommunityDirectPublishRequest,
     CommunityFeedResponse,
     CommunityLikeResponse,
+    CommunityModerationActionRequest,
     CommunityPostView,
     CommunityPublishRequest,
+    CommunityReportCreateRequest,
+    CommunityReportView,
     CommunityRelayPublishRequest,
+    CommunityRemakeAnalyzeRequest,
+    CommunityRemakeAnalyzeResponse,
     CommunityRemakeGuideRequest,
     CommunityRemakeGuideResponse,
     CommunityRecommendationsResponse,
@@ -80,9 +86,9 @@ async def recommendations(
 @router.get("/posts/{post_id}/image")
 async def post_image(
     post_id: int,
-    _: AuthUser = Depends(require_user),
+    current_user: AuthUser = Depends(require_user),
 ) -> Response:
-    data, mime = community_service.load_post_image(post_id)
+    data, mime = community_service.load_post_image(post_id, current_user.id)
     return Response(content=data, media_type=mime)
 
 
@@ -142,12 +148,25 @@ async def remake_guide(
     return community_service.remake_guide(user_id=current_user.id, req=req)
 
 
+@router.post("/remake/analyze", response_model=CommunityRemakeAnalyzeResponse)
+async def remake_analyze(
+    req: CommunityRemakeAnalyzeRequest,
+    current_user: AuthUser = Depends(require_user),
+) -> CommunityRemakeAnalyzeResponse:
+    return community_service.remake_analyze(user_id=current_user.id, req=req)
+
+
 @router.post("/compose", response_model=CommunityComposeResponse)
 async def compose(
-    req: CommunityComposeRequest,
-    current_user: AuthUser = Depends(require_user),
+    _req: CommunityComposeRequest,
+    _current_user: AuthUser = Depends(require_user),
 ) -> CommunityComposeResponse:
-    return await community_service.compose_image(current_user.id, req)
+    # TODO(p2): after async jobs path reaches SLA and global rate-limit governance,
+    # decide whether to restore sync endpoint or permanently deprecate it.
+    raise HTTPException(
+        status_code=410,
+        detail="synchronous compose is disabled; use /community/compose/jobs",
+    )
 
 
 @router.post("/compose/jobs", response_model=CommunityCreativeJobView)
@@ -160,10 +179,14 @@ async def compose_job_create(
 
 @router.post("/cocreate/compose", response_model=CommunityCocreateComposeResponse)
 async def cocreate_compose(
-    req: CommunityCocreateComposeRequest,
-    current_user: AuthUser = Depends(require_user),
+    _req: CommunityCocreateComposeRequest,
+    _current_user: AuthUser = Depends(require_user),
 ) -> CommunityCocreateComposeResponse:
-    return await community_service.cocreate_compose(current_user.id, req)
+    # TODO(p2): same policy as /compose; keep async jobs path as the primary contract.
+    raise HTTPException(
+        status_code=410,
+        detail="synchronous cocreate is disabled; use /community/cocreate/jobs",
+    )
 
 
 @router.post("/cocreate/jobs", response_model=CommunityCreativeJobView)
@@ -196,3 +219,30 @@ async def cancel_creative_job(
     current_user: AuthUser = Depends(require_user),
 ) -> CommunityCreativeJobView:
     return community_service.cancel_creative_job(current_user.id, job_id)
+
+
+@router.post("/posts/{post_id}/report", response_model=CommunityReportView)
+async def report_post(
+    post_id: int,
+    req: CommunityReportCreateRequest,
+    current_user: AuthUser = Depends(require_user),
+) -> CommunityReportView:
+    return community_service.report_post(current_user.id, post_id, req)
+
+
+@router.get("/admin/reports", response_model=list[CommunityReportView])
+async def admin_list_reports(
+    status: str | None = Query(default=None, min_length=1, max_length=24),
+    limit: int = Query(default=50, ge=1, le=100),
+    _: int = Depends(require_admin),
+) -> list[CommunityReportView]:
+    return community_service.list_reports(status=status, limit=limit)
+
+
+@router.post("/admin/reports/{report_id}/action", response_model=CommunityReportView)
+async def admin_report_action(
+    report_id: int,
+    req: CommunityModerationActionRequest,
+    admin_user_id: int = Depends(require_admin),
+) -> CommunityReportView:
+    return community_service.moderate_report(admin_user_id=admin_user_id, report_id=report_id, req=req)

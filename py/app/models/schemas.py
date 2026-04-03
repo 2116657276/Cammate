@@ -164,6 +164,7 @@ class CommunityPostView(BaseModel):
 class CommunityFeedResponse(BaseModel):
     items: list[CommunityPostView]
     next_offset: int
+    has_more: bool = False
 
 
 class CommunityRecommendationView(BaseModel):
@@ -174,6 +175,21 @@ class CommunityRecommendationView(BaseModel):
 
 class CommunityRecommendationsResponse(BaseModel):
     items: list[CommunityRecommendationView]
+
+
+class CommunityRemakeAnalyzeRequest(BaseModel):
+    template_post_id: int = Field(ge=1)
+    candidate_image_base64: str = Field(min_length=16)
+
+
+class CommunityRemakeAnalyzeResponse(BaseModel):
+    template_post_id: int
+    pose_score: float = Field(ge=0.0, le=1.0)
+    framing_score: float = Field(ge=0.0, le=1.0)
+    alignment_score: float = Field(ge=0.0, le=1.0)
+    mismatch_hints: list[str] = Field(default_factory=list)
+    implementation_status: Literal["ready", "placeholder"] = "ready"
+    placeholder_notes: list[str] = Field(default_factory=list)
 
 
 class CommunityComposeRequest(BaseModel):
@@ -225,6 +241,8 @@ class CommunityCreativeJobView(BaseModel):
     model: str = ""
     composed_image_base64: str | None = None
     compare_input_base64: str | None = None
+    storage_mode: Literal["database", "file", "hybrid"] = "database"
+    error_code: str = ""
     placeholder_notes: list[str] = Field(default_factory=list)
     error_message: str = ""
     request_id: str = ""
@@ -263,6 +281,29 @@ class CommunityDeleteResponse(BaseModel):
     ok: bool
 
 
+class CommunityReportCreateRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=80)
+    detail_text: str = Field(default="", max_length=280)
+
+
+class CommunityReportView(BaseModel):
+    id: int
+    post_id: int
+    reporter_user_id: int
+    reason: str
+    detail_text: str = ""
+    status: str
+    moderation_action: str = ""
+    resolution_note: str = ""
+    created_at: int
+    resolved_at: int | None = None
+
+
+class CommunityModerationActionRequest(BaseModel):
+    action: Literal["hide", "restore", "delete", "ignore"]
+    resolution_note: str = Field(default="", max_length=280)
+
+
 class CommunityRemakeGuideRequest(BaseModel):
     template_post_id: int = Field(ge=1)
 
@@ -271,6 +312,10 @@ class CommunityRemakeGuideResponse(BaseModel):
     template_post: CommunityPostView
     shot_script: list[str]
     camera_hint: str
+    pose_hint: str = ""
+    framing_hint: str = ""
+    timing_hint: str = ""
+    alignment_checks: list[str] = Field(default_factory=list)
     implementation_status: Literal["ready", "placeholder"] = "ready"
     placeholder_notes: list[str] = Field(default_factory=list)
 

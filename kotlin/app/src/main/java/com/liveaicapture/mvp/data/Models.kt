@@ -65,7 +65,7 @@ enum class RetouchMode(val raw: String, val label: String) {
 }
 
 data class AppSettings(
-    val serverUrl: String = "http://10.0.2.2:8000",
+    val serverUrl: String = "http://10.0.2.2:8010",
     val intervalMs: Long = 1000L,
     val voiceEnabled: Boolean = true,
     val debugEnabled: Boolean = false,
@@ -101,6 +101,13 @@ data class CameraUiState(
     val stabilityScore: Float = 0f,
     val analyzingTips: Boolean = false,
     val moveHintText: String = "",
+    val remakeTemplatePostId: Int? = null,
+    val remakeTemplateSceneType: String = "",
+    val remakeCameraHint: String = "",
+    val remakePoseHint: String = "",
+    val remakeFramingHint: String = "",
+    val remakeTimingHint: String = "",
+    val remakeAlignmentChecks: List<String> = emptyList(),
 )
 
 data class AuthUser(
@@ -209,6 +216,20 @@ data class CommunityRemakeGuide(
     val templatePost: CommunityPostItem,
     val shotScript: List<String>,
     val cameraHint: String,
+    val poseHint: String,
+    val framingHint: String,
+    val timingHint: String,
+    val alignmentChecks: List<String>,
+    val implementationStatus: String,
+    val placeholderNotes: List<String>,
+)
+
+data class CommunityRemakeAnalysis(
+    val templatePostId: Int,
+    val poseScore: Float,
+    val framingScore: Float,
+    val alignmentScore: Float,
+    val mismatchHints: List<String>,
     val implementationStatus: String,
     val placeholderNotes: List<String>,
 )
@@ -220,6 +241,8 @@ data class CommunityUiState(
     val cocreating: Boolean = false,
     val publishingDirect: Boolean = false,
     val remakeLoading: Boolean = false,
+    val remakeAnalyzing: Boolean = false,
+    val feedHasMore: Boolean = true,
     val feed: List<CommunityPostItem> = emptyList(),
     val recommendations: List<CommunityRecommendationItem> = emptyList(),
     val commentsByPost: Map<Int, List<CommunityCommentItem>> = emptyMap(),
@@ -277,6 +300,7 @@ data class CommunityUiState(
     val cocreateErrorMessage: String = "",
     val cocreateRequestId: String = "",
     val remakeGuide: CommunityRemakeGuide? = null,
+    val remakeAnalysis: CommunityRemakeAnalysis? = null,
     val authHeader: String = "",
     val errorMessage: String? = null,
 )

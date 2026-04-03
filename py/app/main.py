@@ -21,6 +21,7 @@ from app.core.logging import request_id_ctx_var
 from app.core.logging import setup_logging
 from app.services import community_service
 from providers.factory import close_provider
+from scene_detector import describe_scene_runtime
 setup_logging()
 logger = logging.getLogger("app.api")
 
@@ -85,18 +86,37 @@ def create_app() -> FastAPI:
         os.getenv("APP_CONFIG_LOADED_ENV_FILES", "<none>"),
     )
     logger.info(
-        "startup.community COMMUNITY_UPLOAD_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s COMMUNITY_SEED_ENABLED=%s COMMUNITY_SEED_COUNT=%s COMMUNITY_CREATIVE_WORKER_COUNT=%s COMMUNITY_CREATIVE_MAX_RETRIES=%s COMMUNITY_CREATIVE_RETRY_BASE_SEC=%s",
+        "startup.community APP_DB_PATH=%s COMMUNITY_UPLOAD_DIR=%s COMMUNITY_DEMO_ASSET_DIR=%s COMMUNITY_SEED_MANIFEST_PATH=%s COMMUNITY_CREATIVE_RESULT_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s COMMUNITY_SEED_ENABLED=%s COMMUNITY_SEED_COUNT=%s COMMUNITY_CREATIVE_WORKER_COUNT=%s COMMUNITY_CREATIVE_MAX_RETRIES=%s COMMUNITY_CREATIVE_RETRY_BASE_SEC=%s CREATIVE_QUEUE_BACKEND=%s CREATIVE_REDIS_URL=%s CREATIVE_STORAGE_PROVIDER=%s CREATIVE_STORAGE_BUCKET=%s CREATIVE_EMBEDDED_WORKER=%s COMMUNITY_POSE_MODEL=%s",
+        os.getenv("APP_DB_PATH", "<project>/app_data.db"),
         os.getenv("COMMUNITY_UPLOAD_DIR", "<project>/uploads/community"),
+        os.getenv("COMMUNITY_DEMO_ASSET_DIR", "<project>/demo_assets/community_seed"),
+        os.getenv("COMMUNITY_SEED_MANIFEST_PATH", "<project>/demo_assets/community_seed/manifest.json"),
+        os.getenv("COMMUNITY_CREATIVE_RESULT_DIR", "<project>/creative_results"),
         os.getenv("COMMUNITY_UPLOAD_MAX_SIDE", "1920"),
         os.getenv("COMMUNITY_RECOMMEND_LIMIT_DEFAULT", "12"),
         os.getenv("COMMUNITY_BLOCKED_WORDS", "广告,引流,加微信"),
         os.getenv("COMMUNITY_IMAGE_API_URL", "<fallback:ARK_IMAGE_API_URL>"),
         os.getenv("COMMUNITY_IMAGE_MODEL", "<fallback:ARK_IMAGE_MODEL>"),
         os.getenv("COMMUNITY_SEED_ENABLED", "true"),
-        os.getenv("COMMUNITY_SEED_COUNT", "18"),
+        os.getenv("COMMUNITY_SEED_COUNT", "28"),
         os.getenv("COMMUNITY_CREATIVE_WORKER_COUNT", "2"),
         os.getenv("COMMUNITY_CREATIVE_MAX_RETRIES", "2"),
         os.getenv("COMMUNITY_CREATIVE_RETRY_BASE_SEC", "2"),
+        os.getenv("CREATIVE_QUEUE_BACKEND", "redis"),
+        os.getenv("CREATIVE_REDIS_URL", "redis://127.0.0.1:6379/0"),
+        os.getenv("CREATIVE_STORAGE_PROVIDER", "local"),
+        os.getenv("CREATIVE_STORAGE_BUCKET", "cammate-creative"),
+        os.getenv("CREATIVE_EMBEDDED_WORKER", "false"),
+        os.getenv("COMMUNITY_POSE_MODEL", "yolo11n-pose.pt"),
+    )
+    scene_info = describe_scene_runtime()
+    logger.info(
+        "startup.scene_model ready=%s model_count=%s custom_override=%s model_paths=%s name_samples=%s",
+        scene_info.get("ready", False),
+        scene_info.get("model_count", 0),
+        scene_info.get("custom_override", False),
+        scene_info.get("model_paths", []),
+        scene_info.get("name_samples", []),
     )
     return app
 

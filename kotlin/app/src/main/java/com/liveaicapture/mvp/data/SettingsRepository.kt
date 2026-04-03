@@ -14,6 +14,14 @@ import kotlinx.coroutines.flow.map
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "live_ai_capture_settings")
 
 class SettingsRepository(private val context: Context) {
+    private val defaultServerUrl = "http://10.0.2.2:8010"
+
+    private fun normalizeServerUrl(raw: String?): String {
+        val value = raw?.trim().orEmpty()
+        if (value.isBlank()) return defaultServerUrl
+        if (value == "http://10.0.2.2:8000") return defaultServerUrl
+        return value
+    }
 
     private object Keys {
         val serverUrl = stringPreferencesKey("server_url")
@@ -26,7 +34,7 @@ class SettingsRepository(private val context: Context) {
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { pref ->
         AppSettings(
-            serverUrl = pref[Keys.serverUrl] ?: "http://10.0.2.2:8000",
+            serverUrl = normalizeServerUrl(pref[Keys.serverUrl]),
             intervalMs = (pref[Keys.intervalMs] ?: 1000L).coerceIn(300L, 5000L),
             voiceEnabled = pref[Keys.voiceEnabled] ?: true,
             debugEnabled = pref[Keys.debugEnabled] ?: false,
@@ -36,7 +44,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun updateServerUrl(value: String) {
-        context.dataStore.edit { it[Keys.serverUrl] = value.trim() }
+        context.dataStore.edit { it[Keys.serverUrl] = normalizeServerUrl(value) }
     }
 
     suspend fun updateIntervalMs(value: Long) {
@@ -61,7 +69,7 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateAll(settings: AppSettings) {
         context.dataStore.edit { pref ->
-            pref[Keys.serverUrl] = settings.serverUrl.trim()
+            pref[Keys.serverUrl] = normalizeServerUrl(settings.serverUrl)
             pref[Keys.intervalMs] = settings.intervalMs.coerceIn(300L, 5000L)
             pref[Keys.voiceEnabled] = settings.voiceEnabled
             pref[Keys.debugEnabled] = settings.debugEnabled
@@ -72,7 +80,7 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun resetDefaults() {
         context.dataStore.edit { pref ->
-            pref[Keys.serverUrl] = "http://10.0.2.2:8000"
+            pref[Keys.serverUrl] = defaultServerUrl
             pref[Keys.intervalMs] = 1000L
             pref[Keys.voiceEnabled] = true
             pref[Keys.debugEnabled] = false

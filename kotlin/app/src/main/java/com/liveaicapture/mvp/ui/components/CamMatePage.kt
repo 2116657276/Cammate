@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,80 +45,87 @@ fun CamMatePage(
     topActionText: String? = null,
     onTopAction: (() -> Unit)? = null,
     subtitle: String? = null,
+    bottomBar: @Composable (() -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color(0xFFFFFAF0),
-                            Color(0xFFEFF4FB),
-                            MaterialTheme.colorScheme.background,
-                        ),
-                    ),
-                ),
-        ) {
-            LazyColumn(
+    Scaffold(
+        bottomBar = { bottomBar?.invoke() },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { innerPadding ->
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                    .background(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFFFFFAF0),
+                                Color(0xFFEFF4FB),
+                                MaterialTheme.colorScheme.background,
+                            ),
+                        ),
+                    ),
             ) {
-                item {
-                    AnimatedVisibility(
-                        visible = entered,
-                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .statusBarsPadding()
-                                .padding(top = 8.dp, bottom = 6.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item {
+                        AnimatedVisibility(
+                            visible = entered,
+                            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .statusBarsPadding()
+                                    .padding(top = 8.dp, bottom = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Text(
-                                    text = title,
-                                    style = MaterialTheme.typography.titleLarge,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                )
                                 Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    if (onTopAction != null && !topActionText.isNullOrBlank()) {
-                                        TextButton(onClick = onTopAction) {
-                                            Text(topActionText)
+                                    Text(
+                                        text = title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        if (onTopAction != null && !topActionText.isNullOrBlank()) {
+                                            TextButton(onClick = onTopAction) {
+                                                Text(topActionText)
+                                            }
                                         }
-                                    }
-                                    if (onBack != null) {
-                                        TextButton(onClick = onBack) {
-                                            Text(backText)
+                                        if (onBack != null) {
+                                            TextButton(onClick = onBack) {
+                                                Text(backText)
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if (!subtitle.isNullOrBlank()) {
-                                Text(
-                                    text = subtitle,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                )
+                                if (!subtitle.isNullOrBlank()) {
+                                    Text(
+                                        text = subtitle,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.secondary,
+                                    )
+                                }
                             }
                         }
                     }
+                    content()
+                    item { androidx.compose.foundation.layout.Spacer(Modifier.padding(bottom = 14.dp)) }
                 }
-                content()
-                item { androidx.compose.foundation.layout.Spacer(Modifier.padding(bottom = 14.dp)) }
             }
         }
     }

@@ -151,7 +151,9 @@ class CommunityApiClient(
             val obj = json.parseToJsonElement(raw).jsonObject
             val items = parsePostsArray(obj["items"]?.jsonArray ?: JsonArray(emptyList()))
             val nextOffset = obj["next_offset"]?.jsonPrimitive?.intOrNull ?: (offset + items.size)
-            CommunityFeedResult(items = items, nextOffset = nextOffset)
+            val hasMore = obj["has_more"]?.jsonPrimitive?.contentOrNull == "true" ||
+                obj["has_more"]?.jsonPrimitive?.toString() == "true"
+            CommunityFeedResult(items = items, nextOffset = nextOffset, hasMore = hasMore)
         }
     }
 
@@ -323,6 +325,27 @@ class CommunityApiClient(
             payload = payload,
         )
         parseRemakeGuide(raw)
+    }
+
+    suspend fun analyzeRemake(
+        serverUrl: String,
+        bearerToken: String,
+        templatePostId: Int,
+        candidateImageBase64: String,
+    ): CommunityRemakeAnalysisDto = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("community_remake_analyze")
+        val payload = buildJsonObject {
+            put("template_post_id", JsonPrimitive(templatePostId))
+            put("candidate_image_base64", JsonPrimitive(candidateImageBase64))
+        }.toString()
+        val raw = postJson(
+            serverUrl = serverUrl,
+            bearerToken = bearerToken,
+            requestId = requestId,
+            path = "/community/remake/analyze",
+            payload = payload,
+        )
+        parseRemakeAnalysis(raw)
     }
 
     suspend fun compose(
@@ -577,6 +600,26 @@ class CommunityApiClient(
             templatePost = templatePost,
             shotScript = obj["shot_script"]?.jsonArray.orEmpty().map { it.jsonPrimitive.contentOrNull.orEmpty() },
             cameraHint = obj["camera_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            poseHint = obj["pose_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            framingHint = obj["framing_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            timingHint = obj["timing_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            alignmentChecks = obj["alignment_checks"]?.jsonArray.orEmpty()
+                .map { it.jsonPrimitive.contentOrNull.orEmpty() },
+            implementationStatus = obj["implementation_status"]?.jsonPrimitive?.contentOrNull ?: "ready",
+            placeholderNotes = obj["placeholder_notes"]?.jsonArray.orEmpty()
+                .map { it.jsonPrimitive.contentOrNull.orEmpty() },
+        )
+    }
+
+    private fun parseRemakeAnalysis(raw: String): CommunityRemakeAnalysisDto {
+        val obj = json.parseToJsonElement(raw).jsonObject
+        return CommunityRemakeAnalysisDto(
+            templatePostId = obj["template_post_id"]?.jsonPrimitive?.intOrNull ?: 0,
+            poseScore = obj["pose_score"]?.jsonPrimitive?.contentOrNull?.toFloatOrNull() ?: 0f,
+            framingScore = obj["framing_score"]?.jsonPrimitive?.contentOrNull?.toFloatOrNull() ?: 0f,
+            alignmentScore = obj["alignment_score"]?.jsonPrimitive?.contentOrNull?.toFloatOrNull() ?: 0f,
+            mismatchHints = obj["mismatch_hints"]?.jsonArray.orEmpty()
+                .map { it.jsonPrimitive.contentOrNull.orEmpty() },
             implementationStatus = obj["implementation_status"]?.jsonPrimitive?.contentOrNull ?: "ready",
             placeholderNotes = obj["placeholder_notes"]?.jsonArray.orEmpty()
                 .map { it.jsonPrimitive.contentOrNull.orEmpty() },
@@ -677,6 +720,20 @@ data class CommunityRemakeGuideDto(
     val templatePost: CommunityPostDto,
     val shotScript: List<String>,
     val cameraHint: String,
+    val poseHint: String,
+    val framingHint: String,
+    val timingHint: String,
+    val alignmentChecks: List<String>,
+    val implementationStatus: String,
+    val placeholderNotes: List<String>,
+)
+
+data class CommunityRemakeAnalysisDto(
+    val templatePostId: Int,
+    val poseScore: Float,
+    val framingScore: Float,
+    val alignmentScore: Float,
+    val mismatchHints: List<String>,
     val implementationStatus: String,
     val placeholderNotes: List<String>,
 )
@@ -690,6 +747,7 @@ data class CommunityRecommendationDto(
 data class CommunityFeedResult(
     val items: List<CommunityPostDto>,
     val nextOffset: Int,
+    val hasMore: Boolean,
 )
 
 data class CommunityComposeResult(

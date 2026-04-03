@@ -19,11 +19,15 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.liveaicapture.mvp.ui.CameraScreen
+import com.liveaicapture.mvp.ui.CommunityPublishScreen
 import com.liveaicapture.mvp.ui.CommunityScreen
+import com.liveaicapture.mvp.ui.CommunityToolsScreen
 import com.liveaicapture.mvp.ui.FeedbackScreen
 import com.liveaicapture.mvp.ui.HomeScreen
+import com.liveaicapture.mvp.ui.AiComposeScreen
 import com.liveaicapture.mvp.ui.LoginScreen
 import com.liveaicapture.mvp.ui.MainViewModel
+import com.liveaicapture.mvp.ui.PoseRecommendScreen
 import com.liveaicapture.mvp.ui.RegisterScreen
 import com.liveaicapture.mvp.ui.RetouchScreen
 import com.liveaicapture.mvp.ui.SettingsScreen
@@ -48,8 +52,20 @@ fun CamMateApp() {
     val authState by vm.authUiState.collectAsStateWithLifecycle()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    val openHome: () -> Unit = {
+        navController.navigate("home") {
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
     val openCommunity: () -> Unit = {
         navController.navigate("community") {
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+    val openSettings: () -> Unit = {
+        navController.navigate("settings") {
             launchSingleTop = true
             restoreState = true
         }
@@ -106,16 +122,17 @@ fun CamMateApp() {
         }
         composable("home") {
             HomeScreen(
-                viewModel = vm,
                 openCamera = { navController.navigate("camera") },
+                openPoseRecommend = { navController.navigate("pose_recommend") },
+                openAiCompose = { navController.navigate("ai_compose") },
                 openCommunity = openCommunity,
-                openSettings = { navController.navigate("settings") },
+                openSettings = openSettings,
             )
         }
         composable("camera") {
             CameraScreen(
                 viewModel = vm,
-                openSettings = { navController.navigate("settings") },
+                backToCapture = openHome,
                 openRetouch = {
                     navController.navigate("retouch") {
                         popUpTo("camera") { inclusive = false }
@@ -123,19 +140,25 @@ fun CamMateApp() {
                     }
                 },
                 openFeedback = { navController.navigate("feedback") },
-                openCommunity = openCommunity,
+            )
+        }
+        composable("pose_recommend") {
+            PoseRecommendScreen(
+                viewModel = vm,
+                onBackToCapture = openHome,
+            )
+        }
+        composable("ai_compose") {
+            AiComposeScreen(
+                viewModel = vm,
+                onBackToCapture = openHome,
             )
         }
         composable("settings") {
             SettingsScreen(
                 viewModel = vm,
-                onBack = {
-                    if (!navController.popBackStack()) {
-                        navController.navigate("home") {
-                            launchSingleTop = true
-                        }
-                    }
-                },
+                openHome = openHome,
+                openCommunity = openCommunity,
             )
         }
         composable("retouch") {
@@ -166,15 +189,29 @@ fun CamMateApp() {
         composable("community") {
             CommunityScreen(
                 viewModel = vm,
-                onBack = {
-                    navController.navigate("home") {
-                        popUpTo("home") { inclusive = false }
-                        launchSingleTop = true
-                        restoreState = true
+                openCapture = openHome,
+                openSettings = openSettings,
+                openPublish = { navController.navigate("community_publish") },
+                openTools = { navController.navigate("community_tools") },
+            )
+        }
+        composable("community_publish") {
+            CommunityPublishScreen(
+                viewModel = vm,
+                onBackToCommunity = {
+                    if (!navController.popBackStack()) {
+                        openCommunity()
                     }
                 },
-                onLogout = {
-                    vm.logout()
+            )
+        }
+        composable("community_tools") {
+            CommunityToolsScreen(
+                viewModel = vm,
+                onBackToCommunity = {
+                    if (!navController.popBackStack()) {
+                        openCommunity()
+                    }
                 },
             )
         }
