@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.core.config import SETTINGS
 from app.services.community_service import creative_queue_snapshot
 from scene_detector import describe_scene_runtime
 
@@ -41,4 +42,9 @@ async def healthz() -> dict[str, object]:
             "model_count": 0,
             "custom_override": False,
         }
-    return {"ok": True, "creative_queue": queue_info, "scene_model": scene_info}
+    return {
+        "ok": True,
+        "app_db_path": str(SETTINGS.db_path),
+        "creative_queue": queue_info,
+        "scene_model": scene_info,
+    }

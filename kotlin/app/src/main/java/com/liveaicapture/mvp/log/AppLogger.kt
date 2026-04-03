@@ -2,6 +2,7 @@ package com.liveaicapture.mvp.log
 
 import android.content.Context
 import android.util.Log
+import com.liveaicapture.mvp.BuildConfig
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -16,6 +17,7 @@ class AppLogger(private val context: Context) {
     private val logDir: File by lazy { File(context.filesDir, "logs").apply { mkdirs() } }
     private val logFile: File by lazy { File(logDir, "client.log") }
     private val backupFile: File by lazy { File(logDir, "client.log.1") }
+    private val logcatInfoEnabled = BuildConfig.DEBUG
     private val writerExecutor: ExecutorService by lazy {
         Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "CamMate-LogWriter").apply { isDaemon = true }
@@ -23,7 +25,9 @@ class AppLogger(private val context: Context) {
     }
 
     fun i(tag: String, message: String) {
-        Log.i(tag, message)
+        if (logcatInfoEnabled) {
+            Log.i(tag, message)
+        }
         enqueue("INFO", tag, message, null)
     }
 

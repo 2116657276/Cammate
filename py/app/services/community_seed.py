@@ -9,6 +9,9 @@ from typing import Any
 
 from app.core.config import PROJECT_ROOT
 from app.core.config import SETTINGS
+from PIL import Image
+from PIL import ImageEnhance
+from PIL import ImageOps
 
 logger = logging.getLogger("app.community.seed")
 
@@ -378,7 +381,7 @@ def _insert_relay_posts(
             """,
             (
                 user["id"],
-                child["image_rel_path"],
+                _build_relay_variant_image(child["image_rel_path"]),
                 child["scene_type"],
                 child["place_tag"],
                 max(1, min(int(blueprint["rating"]), 5)),
@@ -398,10 +401,44 @@ def _insert_relay_posts(
                 "place_tag": child["place_tag"],
                 "scene_type": child["scene_type"],
                 "asset_name": child["asset_name"],
-                "image_rel_path": child["image_rel_path"],
+                "image_rel_path": _build_relay_variant_image(child["image_rel_path"]),
             }
         )
     return inserted
+
+
+def _build_relay_variant_image(image_rel_path: str) -> str:
+    source_path = (PROJECT_ROOT / image_rel_path).resolve()
+    if not source_path.exists():
+        return image_rel_path
+
+    source_name = source_path.stem
+    relay_name = f"{source_name}_relay.jpg"
+    relay_rel_path = str(Path("demo_assets") / "community_seed" / relay_name)
+    relay_path = (PROJECT_ROOT / relay_rel_path).resolve()
+    relay_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if relay_path.exists():
+        return relay_rel_path
+
+    with Image.open(source_path) as raw_image:
+        image = ImageOps.exif_transpose(raw_image).convert("RGB")
+        width, height = image.size
+        inset_x = max(24, int(width * 0.06))
+        inset_y = max(24, int(height * 0.06))
+        cropped = image.crop(
+            (
+                inset_x,
+                inset_y,
+                max(inset_x + 1, width - inset_x),
+                max(inset_y + 1, height - inset_y),
+            )
+        )
+        cropped = ImageOps.fit(cropped, (width, height), method=Image.Resampling.LANCZOS)
+        cropped = ImageEnhance.Color(cropped).enhance(1.06)
+        cropped = ImageEnhance.Contrast(cropped).enhance(1.04)
+        cropped.save(relay_path, format="JPEG", quality=84, optimize=True)
+    return relay_rel_path
 
 
 def _apply_style_templates(conn: Any, main_posts: dict[str, dict[str, Any]]) -> None:

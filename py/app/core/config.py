@@ -153,7 +153,7 @@ class Settings:
 load_runtime_env()
 
 SETTINGS = Settings(
-    db_path=Path(os.getenv("APP_DB_PATH", PROJECT_ROOT / "app_data.db")),
+    db_path=Path(os.getenv("APP_DB_PATH", PROJECT_ROOT / "demo_app_data.db")),
     demo_db_path=Path(_env_str("APP_DEMO_DB_PATH", str(PROJECT_ROOT / "demo_app_data.db"))),
     session_ttl_sec=max(300, _env_int("SESSION_TTL_SEC", 604800)),
     pbkdf2_rounds=max(60000, _env_int("PBKDF2_ROUNDS", 120000)),

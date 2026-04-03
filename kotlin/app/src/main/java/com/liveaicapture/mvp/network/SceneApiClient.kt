@@ -7,11 +7,11 @@ import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
@@ -78,7 +78,7 @@ class SceneApiClient(
     }
 
     private fun parseNormPoint(element: kotlinx.serialization.json.JsonElement?): Offset? {
-        val arr = element?.jsonArray ?: return null
+        val arr = element as? JsonArray ?: return null
         if (arr.size < 2) return null
         val x = arr[0].jsonPrimitive.doubleOrNull ?: return null
         val y = arr[1].jsonPrimitive.doubleOrNull ?: return null
@@ -86,7 +86,7 @@ class SceneApiClient(
     }
 
     private fun parseNormRect(element: kotlinx.serialization.json.JsonElement?): Rect? {
-        val arr = element?.jsonArray ?: return null
+        val arr = element as? JsonArray ?: return null
         if (arr.size < 4) return null
         val x1 = arr[0].jsonPrimitive.doubleOrNull ?: return null
         val y1 = arr[1].jsonPrimitive.doubleOrNull ?: return null

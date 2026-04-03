@@ -38,14 +38,16 @@ class CommunityApiClient(
         feedbackId: Int,
         imageBase64: String,
         placeTag: String,
-        sceneType: String,
+        sceneType: String?,
     ): CommunityPostDto = withContext(Dispatchers.IO) {
         val requestId = newRequestId("community_publish_feedback")
         val payload = buildJsonObject {
             put("feedback_id", JsonPrimitive(feedbackId))
             put("image_base64", JsonPrimitive(imageBase64))
             put("place_tag", JsonPrimitive(placeTag.trim()))
-            put("scene_type", JsonPrimitive(sceneType.trim().lowercase()))
+            sceneType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
+                put("scene_type", JsonPrimitive(it))
+            }
         }.toString()
         postJson(
             serverUrl = serverUrl,
@@ -61,7 +63,7 @@ class CommunityApiClient(
         bearerToken: String,
         imageBase64: String,
         placeTag: String,
-        sceneType: String,
+        sceneType: String?,
         caption: String,
         reviewText: String,
         rating: Int?,
@@ -73,7 +75,9 @@ class CommunityApiClient(
         val payload = buildJsonObject {
             put("image_base64", JsonPrimitive(imageBase64))
             put("place_tag", JsonPrimitive(placeTag.trim()))
-            put("scene_type", JsonPrimitive(sceneType.trim().lowercase()))
+            sceneType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
+                put("scene_type", JsonPrimitive(it))
+            }
             put("caption", JsonPrimitive(caption.take(280)))
             put("review_text", JsonPrimitive(reviewText.take(280)))
             rating?.let { put("rating", JsonPrimitive(it.coerceIn(1, 5))) }
@@ -95,7 +99,7 @@ class CommunityApiClient(
         bearerToken: String,
         imageBase64: String,
         placeTag: String,
-        sceneType: String,
+        sceneType: String?,
         caption: String,
         reviewText: String,
         rating: Int?,
@@ -106,7 +110,9 @@ class CommunityApiClient(
         val payload = buildJsonObject {
             put("image_base64", JsonPrimitive(imageBase64))
             put("place_tag", JsonPrimitive(placeTag.trim()))
-            put("scene_type", JsonPrimitive(sceneType.trim().lowercase()))
+            sceneType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
+                put("scene_type", JsonPrimitive(it))
+            }
             put("caption", JsonPrimitive(caption.take(280)))
             put("review_text", JsonPrimitive(reviewText.take(280)))
             rating?.let { put("rating", JsonPrimitive(it.coerceIn(1, 5))) }
@@ -530,7 +536,7 @@ class CommunityApiClient(
 
     private fun parsePost(raw: String): CommunityPostDto {
         val obj = json.parseToJsonElement(raw).jsonObject
-        val relayParent = obj["relay_parent_summary"]?.jsonObject?.let {
+        val relayParent = (obj["relay_parent_summary"] as? JsonObject)?.let {
             CommunityRelayParentDto(
                 id = it["id"]?.jsonPrimitive?.intOrNull ?: 0,
                 userNickname = it["user_nickname"]?.jsonPrimitive?.contentOrNull.orEmpty(),

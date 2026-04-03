@@ -19,7 +19,17 @@ class SettingsRepository(private val context: Context) {
     private fun normalizeServerUrl(raw: String?): String {
         val value = raw?.trim().orEmpty()
         if (value.isBlank()) return defaultServerUrl
-        if (value == "http://10.0.2.2:8000") return defaultServerUrl
+        if (
+            value == "http://10.0.2.2:8000" ||
+            value == "http://127.0.0.1:8000" ||
+            value == "http://localhost:8000"
+        ) {
+            return when {
+                value.contains("10.0.2.2") -> "http://10.0.2.2:8010"
+                value.contains("127.0.0.1") -> "http://127.0.0.1:8010"
+                else -> "http://localhost:8010"
+            }
+        }
         return value
     }
 

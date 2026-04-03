@@ -2,6 +2,8 @@ package com.liveaicapture.mvp.ui
 
 import android.app.Application
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
@@ -45,6 +47,7 @@ import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
 import com.liveaicapture.mvp.network.SceneDetectResult
 import com.liveaicapture.mvp.tts.TtsSpeaker
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1227,7 +1230,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateFeedbackPublishSceneType(value: String) {
-        val normalized = value.trim().lowercase().ifBlank { "general" }
+        val normalized = value.trim().lowercase()
         _feedbackUiState.update {
             it.copy(publishSceneType = normalized, errorMessage = null)
         }
@@ -1238,10 +1241,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!current.visible || current.submitting) return
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _feedbackUiState.update { it.copy(errorMessage = "请先登录") }
-            return
-        }
-        if (current.publishToCommunity && current.publishPlaceTag.trim().isBlank()) {
-            _feedbackUiState.update { it.copy(errorMessage = "发布社区前请填写地点标签") }
             return
         }
         if (current.publishToCommunity && current.photoUri.isNullOrBlank()) {
@@ -1286,7 +1285,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         feedbackId = feedbackId,
                         imageBase64 = imageBase64,
                         placeTag = current.publishPlaceTag.trim(),
-                        sceneType = current.publishSceneType,
+                        sceneType = current.publishSceneType.takeIf { it.isNotBlank() },
                     )
                     publishedPostId = post.id.takeIf { it > 0 }
                     refreshCommunityFeed()
@@ -1347,7 +1346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateDirectPublishSceneType(value: String) {
-        val normalized = value.trim().lowercase().ifBlank { "general" }
+        val normalized = value.trim().lowercase()
         _communityUiState.update { it.copy(publishSceneType = normalized, errorMessage = null) }
     }
 
@@ -1404,10 +1403,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _communityUiState.update { it.copy(errorMessage = "请先选择要发布的照片") }
             return
         }
-        if (state.publishPlaceTag.isBlank()) {
-            _communityUiState.update { it.copy(errorMessage = "请填写地点标签") }
-            return
-        }
         if (state.publishPostType == "relay" && (state.publishRelayParentPostId ?: 0) <= 0) {
             _communityUiState.update { it.copy(errorMessage = "接力发布需要先选择来源帖子") }
             return
@@ -1424,7 +1419,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bearerToken = bearerToken,
                         imageBase64 = imageBase64,
                         placeTag = state.publishPlaceTag.trim(),
-                        sceneType = state.publishSceneType,
+                        sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
                         caption = state.publishCaption.trim(),
                         reviewText = state.publishReviewText.trim(),
                         rating = state.publishRating,
@@ -1437,7 +1432,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bearerToken = bearerToken,
                         imageBase64 = imageBase64,
                         placeTag = state.publishPlaceTag.trim(),
-                        sceneType = state.publishSceneType,
+                        sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
                         caption = state.publishCaption.trim(),
                         reviewText = state.publishReviewText.trim(),
                         rating = state.publishRating,
@@ -1449,6 +1444,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _communityUiState.update {
                     it.copy(
                         publishingDirect = false,
+                        publishImageUri = null,
+                        publishPlaceTag = "",
+                        publishSceneType = "",
                         publishCaption = "",
                         publishReviewText = "",
                         publishRating = null,
@@ -2650,10 +2648,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun encodePhotoUriToBase64(photoUri: String): String {
         val app = getApplication<Application>()
         val uri = Uri.parse(photoUri)
-        val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val resolver = app.contentResolver
+        val originalBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalStateException("无法读取原图")
-        if (bytes.isEmpty()) {
+        if (originalBytes.isEmpty()) {
             throw IllegalStateException("原图内容为空")
+        }
+        val source = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size)
+            ?: throw IllegalStateException("无法解析所选图片")
+        val maxSide = 1600
+        val longestSide = maxOf(source.width, source.height).coerceAtLeast(1)
+        val scaled = if (longestSide <= maxSide) {
+            source
+        } else {
+            val scale = maxSide.toFloat() / longestSide.toFloat()
+            Bitmap.createScaledBitmap(
+                source,
+                (source.width * scale).toInt().coerceAtLeast(1),
+                (source.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        }
+        val output = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 88, output)
+        if (scaled !== source) {
+            scaled.recycle()
+        }
+        source.recycle()
+        val bytes = output.toByteArray()
+        if (bytes.isEmpty()) {
+            throw IllegalStateException("发布图片压缩失败")
         }
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }

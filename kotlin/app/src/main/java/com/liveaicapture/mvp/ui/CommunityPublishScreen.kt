@@ -6,9 +6,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -18,10 +22,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.liveaicapture.mvp.ui.components.CamMatePage
 import com.liveaicapture.mvp.ui.components.SectionCard
 
@@ -31,6 +39,7 @@ private data class CommunityPublishSceneOption(
 )
 
 private val publishScenes = listOf(
+    CommunityPublishSceneOption(raw = "", label = "不设置"),
     CommunityPublishSceneOption(raw = "general", label = "通用"),
     CommunityPublishSceneOption(raw = "portrait", label = "人像"),
     CommunityPublishSceneOption(raw = "landscape", label = "风景"),
@@ -87,15 +96,38 @@ fun CommunityPublishScreen(
                     }
                 }
                 state.publishImageUri?.takeIf { it.isNotBlank() }?.let { uri ->
-                    Text("已选图片：$uri", color = MaterialTheme.colorScheme.secondary)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(uri)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "发布图片预览",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(4f / 3f)
+                                .clip(RoundedCornerShape(18.dp)),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
+                    Text("已选择图片，可直接发布单张照片。", color = MaterialTheme.colorScheme.secondary)
                 }
                 OutlinedTextField(
                     value = state.publishPlaceTag,
                     onValueChange = { viewModel.updateDirectPublishPlaceTag(it) },
-                    label = { Text("地点标签") },
+                    label = { Text("地点标签（可选）") },
                     placeholder = { Text("例如：外滩、海边、老街") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                )
+                Text(
+                    text = "场景标签可选，不选时会按通用动态发布。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                 )
                 Row(
                     modifier = Modifier

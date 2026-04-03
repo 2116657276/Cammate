@@ -51,13 +51,26 @@ def create_app() -> FastAPI:
             return response
         finally:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
-            logger.info(
+            log_level = logging.INFO
+            if status_code >= 500:
+                log_level = logging.ERROR
+            elif status_code >= 400 or elapsed_ms >= 1000:
+                log_level = logging.WARNING
+            logger.log(
+                log_level,
                 "http.request method=%s path=%s status=%d elapsed_ms=%d client=%s",
                 request.method,
                 request.url.path,
                 status_code,
                 elapsed_ms,
                 request.client.host if request.client else "-",
+                extra={
+                    "log_kind": "http_request",
+                    "http_method": request.method,
+                    "http_path": request.url.path,
+                    "http_status": status_code,
+                    "http_elapsed_ms": elapsed_ms,
+                },
             )
             request_id_ctx_var.reset(token)
 
@@ -84,10 +97,11 @@ def create_app() -> FastAPI:
         os.getenv("APP_LOG_LEVEL", "INFO"),
         os.getenv("APP_LOG_DIR", "<project>/logs"),
         os.getenv("APP_CONFIG_LOADED_ENV_FILES", "<none>"),
+        extra={"log_kind": "startup"},
     )
     logger.info(
         "startup.community APP_DB_PATH=%s COMMUNITY_UPLOAD_DIR=%s COMMUNITY_DEMO_ASSET_DIR=%s COMMUNITY_SEED_MANIFEST_PATH=%s COMMUNITY_CREATIVE_RESULT_DIR=%s COMMUNITY_UPLOAD_MAX_SIDE=%s COMMUNITY_RECOMMEND_LIMIT_DEFAULT=%s COMMUNITY_BLOCKED_WORDS=%s COMMUNITY_IMAGE_API_URL=%s COMMUNITY_IMAGE_MODEL=%s COMMUNITY_SEED_ENABLED=%s COMMUNITY_SEED_COUNT=%s COMMUNITY_CREATIVE_WORKER_COUNT=%s COMMUNITY_CREATIVE_MAX_RETRIES=%s COMMUNITY_CREATIVE_RETRY_BASE_SEC=%s CREATIVE_QUEUE_BACKEND=%s CREATIVE_REDIS_URL=%s CREATIVE_STORAGE_PROVIDER=%s CREATIVE_STORAGE_BUCKET=%s CREATIVE_EMBEDDED_WORKER=%s COMMUNITY_POSE_MODEL=%s",
-        os.getenv("APP_DB_PATH", "<project>/app_data.db"),
+        os.getenv("APP_DB_PATH", "<project>/demo_app_data.db"),
         os.getenv("COMMUNITY_UPLOAD_DIR", "<project>/uploads/community"),
         os.getenv("COMMUNITY_DEMO_ASSET_DIR", "<project>/demo_assets/community_seed"),
         os.getenv("COMMUNITY_SEED_MANIFEST_PATH", "<project>/demo_assets/community_seed/manifest.json"),
@@ -108,6 +122,7 @@ def create_app() -> FastAPI:
         os.getenv("CREATIVE_STORAGE_BUCKET", "cammate-creative"),
         os.getenv("CREATIVE_EMBEDDED_WORKER", "false"),
         os.getenv("COMMUNITY_POSE_MODEL", "yolo11n-pose.pt"),
+        extra={"log_kind": "startup"},
     )
     scene_info = describe_scene_runtime()
     logger.info(
@@ -117,6 +132,7 @@ def create_app() -> FastAPI:
         scene_info.get("custom_override", False),
         scene_info.get("model_paths", []),
         scene_info.get("name_samples", []),
+        extra={"log_kind": "startup"},
     )
     return app
 
