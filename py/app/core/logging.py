@@ -18,6 +18,31 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class ConsoleNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        if getattr(record, "log_kind", "") == "startup":
+            return True
+        if getattr(record, "log_kind", "") == "summary":
+            return True
+        if getattr(record, "log_kind", "") == "http_request":
+            method = getattr(record, "http_method", "")
+            status = getattr(record, "http_status", 0)
+            elapsed_ms = getattr(record, "http_elapsed_ms", 0)
+            path = getattr(record, "http_path", "")
+            if status >= 400 or elapsed_ms >= 1000:
+                return True
+            if method not in {"GET", "HEAD", "OPTIONS"}:
+                return True
+            if path.startswith("/healthz"):
+                return False
+            if path.startswith("/community/posts/") and path.endswith("/image"):
+                return False
+            return False
+        return False
+
+
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -39,6 +64,8 @@ def setup_logging() -> None:
     log_dir = Path(os.getenv("APP_LOG_DIR", project_root / "logs"))
     log_file = os.getenv("APP_LOG_FILE", "server.log")
     log_level = os.getenv("APP_LOG_LEVEL", "INFO").upper()
+    console_level = os.getenv("APP_LOG_CONSOLE_LEVEL", log_level).upper()
+    file_level = os.getenv("APP_LOG_FILE_LEVEL", log_level).upper()
     max_bytes = _env_int("APP_LOG_MAX_BYTES", 5 * 1024 * 1024, 256 * 1024, 50 * 1024 * 1024)
     backup_count = _env_int("APP_LOG_BACKUP_COUNT", 5, 1, 30)
 
@@ -52,6 +79,9 @@ def setup_logging() -> None:
             "filters": {
                 "request_id": {
                     "()": "app.core.logging.RequestIdFilter",
+                },
+                "console_noise": {
+                    "()": "app.core.logging.ConsoleNoiseFilter",
                 }
             },
             "formatters": {
@@ -63,13 +93,13 @@ def setup_logging() -> None:
             "handlers": {
                 "console": {
                     "class": "logging.StreamHandler",
-                    "level": log_level,
+                    "level": console_level,
                     "formatter": "default",
-                    "filters": ["request_id"],
+                    "filters": ["request_id", "console_noise"],
                 },
                 "file": {
                     "class": "logging.handlers.RotatingFileHandler",
-                    "level": log_level,
+                    "level": file_level,
                     "formatter": "default",
                     "filename": file_path,
                     "maxBytes": max_bytes,
@@ -89,8 +119,8 @@ def setup_logging() -> None:
                     "propagate": False,
                 },
                 "uvicorn.access": {
-                    "handlers": ["console", "file"],
-                    "level": log_level,
+                    "handlers": ["file"],
+                    "level": file_level,
                     "propagate": False,
                 },
             },
@@ -99,10 +129,12 @@ def setup_logging() -> None:
 
     _LOGGING_CONFIGURED = True
     logging.getLogger("uvicorn.error").info(
-        "logging.ready level=%s file=%s max_bytes=%d backup_count=%d",
+        "logging.ready level=%s console_level=%s file_level=%s file=%s max_bytes=%d backup_count=%d",
         log_level,
+        console_level,
+        file_level,
         file_path,
         max_bytes,
         backup_count,
+        extra={"log_kind": "startup"},
     )
-

@@ -1,12 +1,33 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Local model artifacts: keep only tracked baseline models.
 models/*
 !models/.gitkeep
 !models/scene_yolo11n.pt
 !models/face_detection_yunet_2023mar.onnx
+
+# Local runtime/state outputs.
 app_data.db
+app_data.db-journal
+app_data.db-wal
+app_data.db-shm
+uploads/
+logs/
+creative_results/
+!demo_app_data.db
+!demo_assets/
+!demo_assets/community_seed/
+!demo_assets/community_seed/**
+
+# Local env/config.
 .env
 .env.local
 .vscode/
 .idea/
+
+# Local tool caches.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

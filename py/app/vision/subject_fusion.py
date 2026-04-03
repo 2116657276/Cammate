@@ -56,6 +56,17 @@ class HybridSceneDetector:
             scene_result.center_norm = None
         return scene_result
 
+    def describe_runtime(self) -> dict[str, object]:
+        yolo_info = self._yolo.describe_runtime()
+        return {
+            "ready": bool(yolo_info.get("ready", False)),
+            "model_paths": list(yolo_info.get("model_paths", [])),
+            "model_count": int(yolo_info.get("model_count", 0)),
+            "custom_override": bool(yolo_info.get("custom_override", False)),
+            "name_samples": list(yolo_info.get("name_samples", [])),
+            "yunet_ready": bool(self._yunet.is_ready()),
+        }
+
     def _select_subject_target(
         self,
         image_bytes: bytes,

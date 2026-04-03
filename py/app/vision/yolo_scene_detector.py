@@ -7,14 +7,19 @@ from typing import Any
 
 from PIL import Image
 
+from app.core.config import load_runtime_env
 from app.vision.models import BoxCandidate
 from app.vision.models import SceneResult
 
 
 class YoloSceneDetector:
     def __init__(self) -> None:
+        load_runtime_env()
         self._models: list[Any] = []
         self._ready = False
+        self._model_paths: list[str] = []
+        self._model_name_samples: list[list[str]] = []
+        self._custom_override = False
         self._predict_conf = self._env_float("SCENE_YOLO_PREDICT_CONF", 0.20, 0.01, 0.90)
         self._imgsz = self._env_int("SCENE_YOLO_IMGSZ", 640, 320, 1280)
         self._scene_margin = self._env_float("SCENE_YOLO_SCENE_MARGIN", 0.14, 0.04, 0.45)
@@ -30,15 +35,16 @@ class YoloSceneDetector:
 
         candidates: list[Path] = []
         if custom_model:
+            self._custom_override = True
             resolved = self._resolve_model_path(custom_model, project_root)
             if resolved is not None:
                 candidates.append(resolved)
-        elif default_model.exists():
-            candidates.append(default_model)
-
-        resolved_generic = self._resolve_model_path(generic_model, project_root)
-        if resolved_generic is not None and not any(resolved_generic == item for item in candidates):
-            candidates.append(resolved_generic)
+        else:
+            resolved_generic = self._resolve_model_path(generic_model, project_root)
+            if resolved_generic is not None:
+                candidates.append(resolved_generic)
+            elif default_model.exists():
+                candidates.append(default_model)
 
         if not candidates:
             return
@@ -48,7 +54,12 @@ class YoloSceneDetector:
 
             for model_path in candidates:
                 try:
-                    self._models.append(YOLO(str(model_path)))
+                    model = YOLO(str(model_path))
+                    self._models.append(model)
+                    self._model_paths.append(str(model_path))
+                    names = self._normalize_names(getattr(model, "names", None), {})
+                    sample = [str(name) for _, name in sorted(names.items())[:8]]
+                    self._model_name_samples.append(sample)
                 except Exception:
                     continue
             self._ready = len(self._models) > 0
@@ -56,6 +67,15 @@ class YoloSceneDetector:
                 self._warmup_models()
         except Exception:
             self._ready = False
+
+    def describe_runtime(self) -> dict[str, Any]:
+        return {
+            "ready": bool(self._ready),
+            "model_paths": list(self._model_paths),
+            "model_count": len(self._models),
+            "custom_override": bool(self._custom_override),
+            "name_samples": list(self._model_name_samples),
+        }
 
     def detect_scene_and_boxes(
         self,

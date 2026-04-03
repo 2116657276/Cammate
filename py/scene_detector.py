@@ -36,6 +36,9 @@ class YoloSceneDetector(SceneDetector):
             scene_hint=scene_hint,
         )
 
+    def describe_runtime(self) -> dict[str, object]:
+        return self._detector.describe_runtime()
+
 
 _SCENE_DETECTOR: SceneDetector | None = None
 
@@ -47,5 +50,22 @@ def get_scene_detector() -> SceneDetector:
     return _SCENE_DETECTOR
 
 
-__all__ = ["SceneResult", "BoxCandidate", "SceneDetector", "YoloSceneDetector", "get_scene_detector"]
+def describe_scene_runtime() -> dict[str, object]:
+    detector = get_scene_detector()
+    describe = getattr(detector, "describe_runtime", None)
+    if callable(describe):
+        try:
+            return describe()
+        except Exception:
+            return {"ready": False, "model_paths": [], "model_count": 0, "custom_override": False}
+    return {"ready": False, "model_paths": [], "model_count": 0, "custom_override": False}
 
+
+__all__ = [
+    "SceneResult",
+    "BoxCandidate",
+    "SceneDetector",
+    "YoloSceneDetector",
+    "get_scene_detector",
+    "describe_scene_runtime",
+]

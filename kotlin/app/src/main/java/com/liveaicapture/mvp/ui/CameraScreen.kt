@@ -87,7 +87,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cameraswitch
 import androidx.compose.material.icons.outlined.Exposure
 import androidx.compose.material.icons.outlined.FlashOn
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.ZoomIn
@@ -108,7 +107,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun CameraScreen(
     viewModel: MainViewModel,
-    openSettings: () -> Unit,
+    backToCapture: () -> Unit,
     openRetouch: () -> Unit,
     openFeedback: () -> Unit,
 ) {
@@ -326,17 +325,8 @@ fun CameraScreen(
                     )
                 }
 
-                IconButton(
-                    onClick = openSettings,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(Color(0x80000000), CircleShape),
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Settings,
-                        contentDescription = "设置",
-                        tint = Color.White,
-                    )
+                TextButton(onClick = backToCapture) {
+                    Text("返回拍摄分栏", color = Color.White)
                 }
             }
 
@@ -457,6 +447,25 @@ fun CameraScreen(
                             )
                             uiState.exposureSuggestion?.let {
                                 Text("曝光建议 EV：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                            }
+                            if (uiState.remakeTemplatePostId != null) {
+                                Text(
+                                    text = "姿势模板 #${uiState.remakeTemplatePostId} · ${uiState.remakeTemplateSceneType.ifBlank { "general" }}",
+                                    color = Color(0xFF64748B),
+                                    fontSize = 12.sp,
+                                )
+                                uiState.remakeCameraHint.takeIf { it.isNotBlank() }?.let {
+                                    Text("机位：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                                }
+                                uiState.remakePoseHint.takeIf { it.isNotBlank() }?.let {
+                                    Text("姿态：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                                }
+                                uiState.remakeFramingHint.takeIf { it.isNotBlank() }?.let {
+                                    Text("构图：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                                }
+                                uiState.remakeTimingHint.takeIf { it.isNotBlank() }?.let {
+                                    Text("时机：$it", color = Color(0xFF64748B), fontSize = 12.sp)
+                                }
                             }
                         }
                     }

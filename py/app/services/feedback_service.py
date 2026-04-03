@@ -10,6 +10,7 @@ from app.models.schemas import FeedbackRequest
 def submit(user_id: int, req: FeedbackRequest) -> int:
     scene = req.scene.strip().lower() or "general"
     tip_text = req.tip_text.strip()
+    review_text = req.review_text.strip()
     session_meta = json.dumps(req.session_meta or {}, ensure_ascii=False)
 
     conn = open_db()
@@ -17,8 +18,10 @@ def submit(user_id: int, req: FeedbackRequest) -> int:
         now = int(time.time())
         cur = conn.execute(
             """
-            INSERT INTO feedback(user_id, rating, scene, tip_text, photo_uri, is_retouch, session_meta, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO feedback(
+                user_id, rating, scene, tip_text, photo_uri, is_retouch, review_text, session_meta, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -27,6 +30,7 @@ def submit(user_id: int, req: FeedbackRequest) -> int:
                 tip_text,
                 req.photo_uri,
                 1 if req.is_retouch else 0,
+                review_text,
                 session_meta,
                 now,
             ),

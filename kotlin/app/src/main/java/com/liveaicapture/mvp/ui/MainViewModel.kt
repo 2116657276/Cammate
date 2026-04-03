@@ -2,6 +2,8 @@ package com.liveaicapture.mvp.ui
 
 import android.app.Application
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
@@ -16,6 +18,13 @@ import com.liveaicapture.mvp.data.AppSettings
 import com.liveaicapture.mvp.data.AuthUiState
 import com.liveaicapture.mvp.data.CameraUiState
 import com.liveaicapture.mvp.data.CaptureMode
+import com.liveaicapture.mvp.data.CommunityCommentItem
+import com.liveaicapture.mvp.data.CommunityPostItem
+import com.liveaicapture.mvp.data.CommunityRecommendationItem
+import com.liveaicapture.mvp.data.CommunityRelayParentItem
+import com.liveaicapture.mvp.data.CommunityRemakeAnalysis
+import com.liveaicapture.mvp.data.CommunityRemakeGuide
+import com.liveaicapture.mvp.data.CommunityUiState
 import com.liveaicapture.mvp.data.FeedbackUiState
 import com.liveaicapture.mvp.data.GuideProvider
 import com.liveaicapture.mvp.data.RetouchMode
@@ -27,11 +36,18 @@ import com.liveaicapture.mvp.data.SettingsRepository
 import com.liveaicapture.mvp.log.AppLog
 import com.liveaicapture.mvp.network.AnalyzeApiClient
 import com.liveaicapture.mvp.network.AuthApiClient
+import com.liveaicapture.mvp.network.CommunityApiClient
+import com.liveaicapture.mvp.network.CommunityCommentDto
+import com.liveaicapture.mvp.network.CommunityCreativeJobDto
+import com.liveaicapture.mvp.network.CommunityPostDto
+import com.liveaicapture.mvp.network.CommunityRemakeAnalysisDto
+import com.liveaicapture.mvp.network.CommunityRemakeGuideDto
 import com.liveaicapture.mvp.network.FeedbackApiClient
 import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
 import com.liveaicapture.mvp.network.SceneDetectResult
 import com.liveaicapture.mvp.tts.TtsSpeaker
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,7 +56,10 @@ import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,6 +90,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val authApiClient = AuthApiClient()
     private val feedbackApiClient = FeedbackApiClient()
     private val retouchApiClient = RetouchApiClient()
+    private val communityApiClient = CommunityApiClient()
     private var ttsSpeaker: TtsSpeaker? = null
     private val appLogger = AppLog.get(application)
 
@@ -85,6 +105,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _feedbackUiState = MutableStateFlow(FeedbackUiState())
     val feedbackUiState: StateFlow<FeedbackUiState> = _feedbackUiState.asStateFlow()
+
+    private val _communityUiState = MutableStateFlow(CommunityUiState())
+    val communityUiState: StateFlow<CommunityUiState> = _communityUiState.asStateFlow()
 
     private val requestGate = Any()
     private var analyzeInFlight = false
@@ -116,6 +139,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingSceneSwitchVotes = 0
     private var pendingSubjectJumpCenter: Offset? = null
     private var pendingSubjectJumpVotes = 0
+    private var communityFeedOffset = 0
+    private var composeJobPolling: Job? = null
+    private var cocreateJobPolling: Job? = null
 
     private var bearerToken: String = ""
 
@@ -146,6 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!session.isAvailable || session.expiresAtEpochSec <= nowSec) {
                 sessionRepository.clearSession()
                 bearerToken = ""
+                syncCommunityAuthHeader()
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
                     authenticated = false,
@@ -156,6 +183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             bearerToken = session.bearerToken
+            syncCommunityAuthHeader()
             try {
                 val user = authApiClient.me(_uiState.value.settings.serverUrl, bearerToken)
                 _authUiState.value = AuthUiState(
@@ -172,6 +200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 sessionRepository.clearSession()
                 bearerToken = ""
+                syncCommunityAuthHeader()
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
                     authenticated = false,
@@ -197,6 +226,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     password = password,
                 )
                 bearerToken = result.bearerToken
+                syncCommunityAuthHeader()
                 sessionRepository.saveSession(result.bearerToken, result.expiresInSec, result.user)
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
@@ -236,6 +266,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     nickname = nickname,
                 )
                 bearerToken = result.bearerToken
+                syncCommunityAuthHeader()
                 sessionRepository.saveSession(result.bearerToken, result.expiresInSec, result.user)
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
@@ -267,19 +298,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             logClientInfo("auth.logout", "start")
             val token = bearerToken
-            if (token.isNotBlank()) {
-                try {
-                    authApiClient.logout(_uiState.value.settings.serverUrl, token)
-                } catch (e: Exception) {
-                    logClientError(
-                        scope = "auth.logout",
-                        throwable = e,
-                        userHint = "登出接口调用失败",
-                    )
-                }
-            }
+            val serverUrl = _uiState.value.settings.serverUrl
+
+            // 本地会话先立即清理，确保“退出登录”按钮可即时响应。
             sessionRepository.clearSession()
             bearerToken = ""
+            syncCommunityAuthHeader()
             _authUiState.value = AuthUiState(
                 checkingSession = false,
                 authenticated = false,
@@ -288,13 +312,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 errorMessage = null,
             )
             resetFlowAfterLogout()
-            logClientInfo("auth.logout", "completed")
+            logClientInfo("auth.logout", "local_session_cleared")
+
+            // 服务端会话回收采用异步 best-effort，避免弱网下阻塞 UI。
+            if (token.isNotBlank()) {
+                viewModelScope.launch {
+                    val remoteOk = withTimeoutOrNull(3500L) {
+                        try {
+                            authApiClient.logout(serverUrl, token)
+                            true
+                        } catch (e: Exception) {
+                            logClientError(
+                                scope = "auth.logout.remote",
+                                throwable = e,
+                                userHint = "登出接口调用失败",
+                            )
+                            false
+                        }
+                    } ?: false
+                    logClientInfo("auth.logout", "remote_revoke=$remoteOk")
+                }
+            }
         }
     }
 
     private fun resetFlowAfterLogout() {
+        composeJobPolling?.cancel()
+        composeJobPolling = null
+        cocreateJobPolling?.cancel()
+        cocreateJobPolling = null
         _retouchUiState.value = RetouchUiState()
         _feedbackUiState.value = FeedbackUiState()
+        _communityUiState.value = CommunityUiState()
+        communityFeedOffset = 0
         lastSuccessfulTipText = ""
         recentSuccessfulTips.clear()
         sceneAutoSwitchLockedByManual = false
@@ -1104,6 +1154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isRetouched = false,
             scene = _uiState.value.detectedScene,
             tipText = _uiState.value.tipText,
+            publishSceneType = _uiState.value.detectedScene.raw,
         )
     }
 
@@ -1149,6 +1200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isRetouched = true,
                 scene = _uiState.value.detectedScene,
                 tipText = _uiState.value.tipText,
+                publishSceneType = _uiState.value.detectedScene.raw,
             )
         }
     }
@@ -1159,11 +1211,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateFeedbackReviewText(value: String) {
+        _feedbackUiState.update {
+            it.copy(reviewText = value.take(280), errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishEnabled(enabled: Boolean) {
+        _feedbackUiState.update {
+            it.copy(publishToCommunity = enabled, errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishPlaceTag(value: String) {
+        _feedbackUiState.update {
+            it.copy(publishPlaceTag = value.take(48), errorMessage = null)
+        }
+    }
+
+    fun updateFeedbackPublishSceneType(value: String) {
+        val normalized = value.trim().lowercase()
+        _feedbackUiState.update {
+            it.copy(publishSceneType = normalized, errorMessage = null)
+        }
+    }
+
     fun submitFeedback() {
         val current = _feedbackUiState.value
         if (!current.visible || current.submitting) return
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _feedbackUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (current.publishToCommunity && current.photoUri.isNullOrBlank()) {
+            _feedbackUiState.update { it.copy(errorMessage = "未找到可发布图片，请重新拍摄") }
             return
         }
 
@@ -1179,6 +1260,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     tipText = current.tipText,
                     photoUri = current.photoUri,
                     isRetouch = current.isRetouched,
+                    reviewText = current.reviewText.trim(),
                     sessionMeta = buildJsonObject {
                         val retouchState = _retouchUiState.value
                         val presetValue = if (retouchState.mode == RetouchMode.CUSTOM) "custom" else retouchState.preset.raw
@@ -1193,14 +1275,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 if (feedbackId <= 0) throw IllegalStateException("反馈提交失败")
+                var publishedPostId: Int? = null
+                if (current.publishToCommunity) {
+                    val photoUri = current.photoUri ?: throw IllegalStateException("未找到可发布图片")
+                    val imageBase64 = encodePhotoUriToBase64(photoUri)
+                    val post = communityApiClient.publishPost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        feedbackId = feedbackId,
+                        imageBase64 = imageBase64,
+                        placeTag = current.publishPlaceTag.trim(),
+                        sceneType = current.publishSceneType.takeIf { it.isNotBlank() },
+                    )
+                    publishedPostId = post.id.takeIf { it > 0 }
+                    refreshCommunityFeed()
+                }
                 _feedbackUiState.update {
                     it.copy(
                         submitting = false,
                         submitted = true,
+                        publishedPostId = publishedPostId,
                         errorMessage = null,
                     )
                 }
-                logClientInfo("feedback.submit", "success feedbackId=$feedbackId")
+                logClientInfo("feedback.submit", "success feedbackId=$feedbackId postId=${publishedPostId ?: -1}")
             } catch (e: Exception) {
                 logClientError(
                     scope = "feedback.submit",
@@ -1224,13 +1322,1362 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(statusText = "反馈已提交，感谢支持", showPostCaptureChoice = false) }
     }
 
+    fun clearCommunityError() {
+        _communityUiState.update { it.copy(errorMessage = null) }
+    }
+
+    fun updateDirectPublishImageUri(uri: String?) {
+        _communityUiState.update { it.copy(publishImageUri = uri, errorMessage = null) }
+    }
+
+    fun useLatestPhotoForDirectPublish() {
+        val latest = _uiState.value.lastPhotoUri
+            ?: _feedbackUiState.value.photoUri
+            ?: _retouchUiState.value.originalPhotoUri
+        if (latest.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "暂无最近拍摄照片，请先拍照或从相册选择") }
+            return
+        }
+        _communityUiState.update { it.copy(publishImageUri = latest, errorMessage = null) }
+    }
+
+    fun updateDirectPublishPlaceTag(value: String) {
+        _communityUiState.update { it.copy(publishPlaceTag = value.take(48), errorMessage = null) }
+    }
+
+    fun updateDirectPublishSceneType(value: String) {
+        val normalized = value.trim().lowercase()
+        _communityUiState.update { it.copy(publishSceneType = normalized, errorMessage = null) }
+    }
+
+    fun updateDirectPublishCaption(value: String) {
+        _communityUiState.update { it.copy(publishCaption = value.take(280), errorMessage = null) }
+    }
+
+    fun updateDirectPublishReviewText(value: String) {
+        _communityUiState.update { it.copy(publishReviewText = value.take(280), errorMessage = null) }
+    }
+
+    fun updateDirectPublishRating(value: Int?) {
+        val normalized = value?.coerceIn(1, 5)
+        _communityUiState.update { it.copy(publishRating = normalized, errorMessage = null) }
+    }
+
+    fun startRelayFromPost(parentPostId: Int) {
+        _communityUiState.update {
+            it.copy(
+                publishPostType = "relay",
+                publishRelayParentPostId = parentPostId,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun resetDirectPublishToNormal() {
+        _communityUiState.update {
+            it.copy(
+                publishPostType = "normal",
+                publishRelayParentPostId = null,
+                publishStyleTemplatePostId = null,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun usePostAsTemplate(templatePostId: Int) {
+        _communityUiState.update {
+            it.copy(
+                publishStyleTemplatePostId = templatePostId,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun publishDirectPost() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (state.publishImageUri.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择要发布的照片") }
+            return
+        }
+        if (state.publishPostType == "relay" && (state.publishRelayParentPostId ?: 0) <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "接力发布需要先选择来源帖子") }
+            return
+        }
+        if (state.publishingDirect) return
+
+        viewModelScope.launch {
+            _communityUiState.update { it.copy(publishingDirect = true, errorMessage = null) }
+            try {
+                val imageBase64 = encodePhotoUriToBase64(state.publishImageUri)
+                val post = if (state.publishPostType == "relay" && (state.publishRelayParentPostId ?: 0) > 0) {
+                    communityApiClient.publishRelayPost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        imageBase64 = imageBase64,
+                        placeTag = state.publishPlaceTag.trim(),
+                        sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
+                        caption = state.publishCaption.trim(),
+                        reviewText = state.publishReviewText.trim(),
+                        rating = state.publishRating,
+                        relayParentPostId = state.publishRelayParentPostId ?: 0,
+                        styleTemplatePostId = state.publishStyleTemplatePostId,
+                    )
+                } else {
+                    communityApiClient.publishDirectPost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        imageBase64 = imageBase64,
+                        placeTag = state.publishPlaceTag.trim(),
+                        sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
+                        caption = state.publishCaption.trim(),
+                        reviewText = state.publishReviewText.trim(),
+                        rating = state.publishRating,
+                        postType = "normal",
+                        relayParentPostId = null,
+                        styleTemplatePostId = state.publishStyleTemplatePostId,
+                    )
+                }
+                _communityUiState.update {
+                    it.copy(
+                        publishingDirect = false,
+                        publishImageUri = null,
+                        publishPlaceTag = "",
+                        publishSceneType = "",
+                        publishCaption = "",
+                        publishReviewText = "",
+                        publishRating = null,
+                        publishPostType = "normal",
+                        publishRelayParentPostId = null,
+                        publishStyleTemplatePostId = null,
+                        referencePostId = post.id.takeIf { id -> id > 0 } ?: it.referencePostId,
+                        errorMessage = null,
+                    )
+                }
+                refreshCommunityFeed(reset = true)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.publish.direct",
+                    throwable = e,
+                    userHint = "社区发布失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        publishingDirect = false,
+                        errorMessage = "发布失败，请检查网络后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun refreshCommunityFeed(reset: Boolean = true) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val previousFeed = _communityUiState.value.feed
+        if (reset) {
+            communityFeedOffset = 0
+            _communityUiState.update {
+                it.copy(
+                    loadingFeed = true,
+                    feedHasMore = true,
+                    errorMessage = null,
+                )
+            }
+        } else {
+            if (!_communityUiState.value.feedHasMore) return
+            _communityUiState.update { it.copy(loadingFeed = true, errorMessage = null) }
+        }
+
+        viewModelScope.launch {
+            try {
+                val currentFeed = if (reset) emptyList() else _communityUiState.value.feed
+                val result = communityApiClient.fetchFeed(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    offset = communityFeedOffset,
+                    limit = 20,
+                )
+                val mergedFromServer = if (reset) {
+                    result.items.map { it.toCommunityPost(_uiState.value.settings.serverUrl) }
+                } else {
+                    val appended = result.items.map { it.toCommunityPost(_uiState.value.settings.serverUrl) }
+                    (currentFeed + appended).distinctBy { it.id }
+                }
+                communityFeedOffset = result.nextOffset
+                _communityUiState.update {
+                    it.copy(
+                        loadingFeed = false,
+                        feed = mergedFromServer,
+                        feedHasMore = result.hasMore,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.feed",
+                    throwable = e,
+                    userHint = "加载社区内容失败",
+                )
+                _communityUiState.update {
+                    if (reset) {
+                        it.copy(
+                            loadingFeed = false,
+                            feed = previousFeed,
+                            errorMessage = "加载社区内容失败，请下拉重试",
+                        )
+                    } else {
+                        it.copy(
+                            loadingFeed = false,
+                            errorMessage = "加载社区内容失败，请稍后重试",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun updateRecommendationPlaceTag(value: String) {
+        _communityUiState.update { it.copy(recommendationPlaceTag = value.take(48)) }
+    }
+
+    fun updateRecommendationSceneType(value: String) {
+        val scene = value.trim().lowercase().ifBlank { "general" }
+        _communityUiState.update { it.copy(recommendationSceneType = scene) }
+    }
+
+    fun refreshRecommendations() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        // V1 仅支持地点 + 场景类型维度推荐。
+        // 姿势（pose）维度留到后续版本，不在本次请求参数内。
+        val snapshot = _communityUiState.value
+        _communityUiState.update { it.copy(loadingRecommendations = true, errorMessage = null) }
+        viewModelScope.launch {
+            try {
+                val items = communityApiClient.fetchRecommendations(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    placeTag = snapshot.recommendationPlaceTag,
+                    sceneType = snapshot.recommendationSceneType,
+                    limit = 12,
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingRecommendations = false,
+                        recommendations = items.map { item ->
+                            CommunityRecommendationItem(
+                                post = item.post.toCommunityPost(_uiState.value.settings.serverUrl),
+                                score = item.score,
+                                reason = item.reason,
+                            )
+                        },
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.recommendations",
+                    throwable = e,
+                    userHint = "推荐加载失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingRecommendations = false,
+                        errorMessage = "推荐加载失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun togglePostLike(post: CommunityPostItem) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val postId = post.id
+        if (_communityUiState.value.likingPostIds.contains(postId)) return
+
+        _communityUiState.update {
+            it.copy(likingPostIds = it.likingPostIds + postId, errorMessage = null)
+        }
+        viewModelScope.launch {
+            try {
+                val liked = if (post.likedByMe) {
+                    communityApiClient.unlikePost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        postId = postId,
+                    )
+                } else {
+                    communityApiClient.likePost(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        postId = postId,
+                    )
+                }
+                _communityUiState.update { state ->
+                    state.copy(
+                        likingPostIds = state.likingPostIds - postId,
+                        feed = state.feed.map { item ->
+                            if (item.id != postId) item else item.copy(
+                                likedByMe = liked.liked,
+                                likeCount = liked.likeCount.coerceAtLeast(0),
+                            )
+                        },
+                        recommendations = state.recommendations.map { rec ->
+                            if (rec.post.id != postId) rec else rec.copy(
+                                post = rec.post.copy(
+                                    likedByMe = liked.liked,
+                                    likeCount = liked.likeCount.coerceAtLeast(0),
+                                ),
+                            )
+                        },
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.like.toggle",
+                    throwable = e,
+                    userHint = "互动失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        likingPostIds = it.likingPostIds - postId,
+                        errorMessage = "点赞操作失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateCommentDraft(postId: Int, value: String) {
+        _communityUiState.update {
+            it.copy(
+                commentDraftByPost = it.commentDraftByPost + (postId to value.take(280)),
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun loadComments(postId: Int) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        _communityUiState.update { it.copy(loadingCommentsPostId = postId, errorMessage = null) }
+        viewModelScope.launch {
+            try {
+                val comments = communityApiClient.fetchComments(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    postId = postId,
+                ).map { it.toCommunityComment() }
+                _communityUiState.update {
+                    it.copy(
+                        loadingCommentsPostId = null,
+                        commentsByPost = it.commentsByPost + (postId to comments),
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.comments.load",
+                    throwable = e,
+                    userHint = "评论加载失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        loadingCommentsPostId = null,
+                        errorMessage = "评论加载失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun submitComment(postId: Int) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val text = _communityUiState.value.commentDraftByPost[postId]?.trim().orEmpty()
+        if (text.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请输入评论内容") }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val comment = communityApiClient.addComment(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    postId = postId,
+                    text = text,
+                ).toCommunityComment()
+                _communityUiState.update { state ->
+                    val currentComments = state.commentsByPost[postId].orEmpty()
+                    val updatedComments = listOf(comment) + currentComments
+                    state.copy(
+                        commentsByPost = state.commentsByPost + (postId to updatedComments),
+                        commentDraftByPost = state.commentDraftByPost + (postId to ""),
+                        feed = state.feed.map { post ->
+                            if (post.id != postId) post else post.copy(commentCount = post.commentCount + 1)
+                        },
+                        recommendations = state.recommendations.map { rec ->
+                            if (rec.post.id != postId) rec else rec.copy(
+                                post = rec.post.copy(commentCount = rec.post.commentCount + 1),
+                            )
+                        },
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.comments.add",
+                    throwable = e,
+                    userHint = "评论发送失败",
+                )
+                _communityUiState.update { it.copy(errorMessage = "评论发送失败，请稍后重试") }
+            }
+        }
+    }
+
+    fun deleteComment(postId: Int, commentId: Int) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                communityApiClient.deleteComment(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    commentId = commentId,
+                )
+                _communityUiState.update { state ->
+                    val currentComments = state.commentsByPost[postId].orEmpty()
+                    val updated = currentComments.filterNot { it.id == commentId }
+                    val delta = 1
+                    state.copy(
+                        commentsByPost = state.commentsByPost + (postId to updated),
+                        feed = state.feed.map { post ->
+                            if (post.id != postId) post else post.copy(
+                                commentCount = (post.commentCount - delta).coerceAtLeast(0),
+                            )
+                        },
+                        recommendations = state.recommendations.map { rec ->
+                            if (rec.post.id != postId) rec else rec.copy(
+                                post = rec.post.copy(
+                                    commentCount = (rec.post.commentCount - delta).coerceAtLeast(0),
+                                ),
+                            )
+                        },
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.comments.delete",
+                    throwable = e,
+                    userHint = "评论删除失败",
+                )
+                _communityUiState.update { it.copy(errorMessage = "评论删除失败，请稍后重试") }
+            }
+        }
+    }
+
+    fun requestRemakeGuide(templatePostId: Int) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        _communityUiState.update {
+            it.copy(
+                remakeLoading = true,
+                remakeAnalysis = null,
+                errorMessage = null,
+            )
+        }
+        viewModelScope.launch {
+            try {
+                val guide = communityApiClient.fetchRemakeGuide(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    templatePostId = templatePostId,
+                ).toCommunityRemakeGuide(_uiState.value.settings.serverUrl)
+                _communityUiState.update {
+                    it.copy(
+                        remakeLoading = false,
+                        remakeGuide = guide,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.remake.guide",
+                    throwable = e,
+                    userHint = "同款复刻指引获取失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        remakeLoading = false,
+                        errorMessage = "同款复刻指引获取失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun applyRemakeGuideToCamera() {
+        val guide = _communityUiState.value.remakeGuide ?: return
+        _uiState.update {
+            it.copy(
+                statusText = "同款复刻已加载：${guide.cameraHint}",
+                tipText = guide.poseHint.ifBlank { guide.shotScript.firstOrNull() ?: it.tipText },
+                remakeTemplatePostId = guide.templatePost.id,
+                remakeTemplateSceneType = guide.templatePost.sceneType,
+                remakeCameraHint = guide.cameraHint,
+                remakePoseHint = guide.poseHint,
+                remakeFramingHint = guide.framingHint,
+                remakeTimingHint = guide.timingHint,
+                remakeAlignmentChecks = guide.alignmentChecks,
+            )
+        }
+        val recommendedMode = when (guide.templatePost.sceneType.lowercase()) {
+            "portrait" -> CaptureMode.PORTRAIT
+            "food" -> CaptureMode.FOOD
+            else -> CaptureMode.GENERAL
+        }
+        updateCaptureMode(recommendedMode)
+    }
+
+    fun selectCommunityReferencePost(postId: Int?) {
+        _communityUiState.update {
+            it.copy(
+                referencePostId = postId,
+                remakeGuide = null,
+                remakeAnalysis = null,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun analyzeLatestPhotoForRemake() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val guide = state.remakeGuide
+        if (guide == null) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择参考图并生成姿势推荐") }
+            return
+        }
+        val latestPhotoUri = _uiState.value.lastPhotoUri
+        if (latestPhotoUri.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先完成一张拍摄，再做姿势比对") }
+            return
+        }
+        if (state.remakeAnalyzing) return
+
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    remakeAnalyzing = true,
+                    remakeAnalysis = null,
+                    errorMessage = null,
+                )
+            }
+            try {
+                val candidateBase64 = encodePhotoUriToBase64(latestPhotoUri)
+                val result = communityApiClient.analyzeRemake(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    templatePostId = guide.templatePost.id,
+                    candidateImageBase64 = candidateBase64,
+                ).toCommunityRemakeAnalysis()
+                _communityUiState.update {
+                    it.copy(
+                        remakeAnalyzing = false,
+                        remakeAnalysis = result,
+                        errorMessage = null,
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.remake.analyze",
+                    throwable = e,
+                    userHint = "姿势分析失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        remakeAnalyzing = false,
+                        errorMessage = "姿势分析失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateCommunityPersonImageUri(uri: String?) {
+        _communityUiState.update { it.copy(personImageUri = uri, errorMessage = null) }
+    }
+
+    fun updateCommunityComposeStrength(value: Float) {
+        _communityUiState.update { it.copy(composeStrength = value.coerceIn(0f, 1f)) }
+    }
+
+    fun clearComposedPreview() {
+        composeJobPolling?.cancel()
+        composeJobPolling = null
+        _communityUiState.update {
+            it.copy(
+                composedPreviewBase64 = null,
+                composeCompareInputBase64 = null,
+                composeJobId = null,
+                composeJobStatus = "",
+                composeJobProgress = 0,
+                composeJobPriority = 100,
+                composeRetryCount = 0,
+                composeMaxRetries = 0,
+                composeNextRetryAt = null,
+                composeStartedAt = null,
+                composeHeartbeatAt = null,
+                composeLeaseExpiresAt = null,
+                composeCancelReason = "",
+                composeImplementationStatus = "ready",
+                composePlaceholderNotes = emptyList(),
+                composeErrorMessage = "",
+                composeRequestId = "",
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun composeCommunityImage() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val referenceId = state.referencePostId
+        if (referenceId == null || referenceId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择参考照片") }
+            return
+        }
+        val personUri = state.personImageUri
+        if (personUri.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择半身或全身照") }
+            return
+        }
+        if (state.composing) return
+
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    composing = true,
+                    composedPreviewBase64 = null,
+                    composeCompareInputBase64 = null,
+                    composeJobId = null,
+                    composeJobStatus = "queued",
+                    composeJobProgress = 0,
+                    composeJobPriority = 100,
+                    composeRetryCount = 0,
+                    composeMaxRetries = 0,
+                    composeNextRetryAt = null,
+                    composeStartedAt = null,
+                    composeHeartbeatAt = null,
+                    composeLeaseExpiresAt = null,
+                    composeCancelReason = "",
+                    composeImplementationStatus = "ready",
+                    composePlaceholderNotes = emptyList(),
+                    composeErrorMessage = "",
+                    composeRequestId = "",
+                    errorMessage = null,
+                )
+            }
+            try {
+                val personBase64 = encodePhotoUriToBase64(personUri)
+                val job = communityApiClient.createComposeJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    referencePostId = referenceId,
+                    personImageBase64 = personBase64,
+                    strength = state.composeStrength,
+                )
+                _communityUiState.update { current ->
+                    current.copy(
+                        composeJobId = job.jobId,
+                        composeJobStatus = job.status,
+                        composeJobProgress = job.progress.coerceIn(0, 100),
+                        composeJobPriority = job.priority.coerceIn(1, 999),
+                        composeRetryCount = job.retryCount.coerceAtLeast(0),
+                        composeMaxRetries = job.maxRetries.coerceAtLeast(0),
+                        composeNextRetryAt = job.nextRetryAt,
+                        composeStartedAt = job.startedAt,
+                        composeHeartbeatAt = job.heartbeatAt,
+                        composeLeaseExpiresAt = job.leaseExpiresAt,
+                        composeCancelReason = job.cancelReason,
+                        composeRequestId = if (job.requestId.isBlank()) current.composeRequestId else job.requestId,
+                    )
+                }
+                launchComposeJobPolling(job.jobId)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose",
+                    throwable = e,
+                    userHint = "AI 融合失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        composing = false,
+                        composeJobStatus = "failed",
+                        composeErrorMessage = "AI 融合任务提交失败",
+                        errorMessage = "AI 融合失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun retryComposeJob() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val jobId = _communityUiState.value.composeJobId
+        if (jobId == null || jobId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "当前没有可重试的融合任务") }
+            return
+        }
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    composing = true,
+                    composeJobStatus = "queued",
+                    composeJobProgress = 0,
+                    composeNextRetryAt = null,
+                    composeStartedAt = null,
+                    composeHeartbeatAt = null,
+                    composeLeaseExpiresAt = null,
+                    composeCancelReason = "",
+                    composeErrorMessage = "",
+                    errorMessage = null,
+                )
+            }
+            try {
+                val retried = communityApiClient.retryCreativeJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    jobId = jobId,
+                )
+                _communityUiState.update { current ->
+                    current.copy(
+                        composeJobStatus = retried.status,
+                        composeJobProgress = retried.progress.coerceIn(0, 100),
+                        composeJobPriority = retried.priority.coerceIn(1, 999),
+                        composeRetryCount = retried.retryCount.coerceAtLeast(0),
+                        composeMaxRetries = retried.maxRetries.coerceAtLeast(0),
+                        composeNextRetryAt = retried.nextRetryAt,
+                        composeStartedAt = retried.startedAt,
+                        composeHeartbeatAt = retried.heartbeatAt,
+                        composeLeaseExpiresAt = retried.leaseExpiresAt,
+                        composeCancelReason = retried.cancelReason,
+                        composeRequestId = if (retried.requestId.isBlank()) current.composeRequestId else retried.requestId,
+                    )
+                }
+                launchComposeJobPolling(jobId)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose.retry",
+                    throwable = e,
+                    userHint = "AI 融合重试失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        composing = false,
+                        composeJobStatus = "failed",
+                        composeErrorMessage = "重试失败",
+                        errorMessage = "AI 融合重试失败，请稍后再试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelComposeJob() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val jobId = _communityUiState.value.composeJobId
+        if (jobId == null || jobId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "当前没有可取消的融合任务") }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val canceled = communityApiClient.cancelCreativeJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    jobId = jobId,
+                )
+                composeJobPolling?.cancel()
+                composeJobPolling = null
+                _communityUiState.update { current ->
+                    current.copy(
+                        composing = false,
+                        composeJobStatus = canceled.status,
+                        composeJobProgress = canceled.progress.coerceIn(0, 100),
+                        composeJobPriority = canceled.priority.coerceIn(1, 999),
+                        composeRetryCount = canceled.retryCount.coerceAtLeast(0),
+                        composeMaxRetries = canceled.maxRetries.coerceAtLeast(0),
+                        composeNextRetryAt = canceled.nextRetryAt,
+                        composeStartedAt = canceled.startedAt,
+                        composeHeartbeatAt = canceled.heartbeatAt,
+                        composeLeaseExpiresAt = canceled.leaseExpiresAt,
+                        composeCancelReason = canceled.cancelReason,
+                        composeErrorMessage = "任务已取消",
+                        errorMessage = "已取消融合任务",
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose.cancel",
+                    throwable = e,
+                    userHint = "取消融合任务失败",
+                )
+                _communityUiState.update {
+                    it.copy(errorMessage = "取消融合任务失败，请稍后重试")
+                }
+            }
+        }
+    }
+
+    fun saveComposedPreviewToGallery(onSaved: (String?) -> Unit = {}) {
+        val preview = _communityUiState.value.composedPreviewBase64
+        if (preview.isNullOrBlank()) {
+            onSaved(null)
+            return
+        }
+        viewModelScope.launch {
+            val uri = try {
+                saveBase64ToGallery(preview, "CamMate_CommunityCompose")
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.compose.save",
+                    throwable = e,
+                    userHint = "融合结果保存失败",
+                )
+                null
+            }
+            onSaved(uri)
+        }
+    }
+
+    fun updateCocreatePersonAUri(uri: String?) {
+        _communityUiState.update { it.copy(cocreatePersonAUri = uri, errorMessage = null) }
+    }
+
+    fun updateCocreatePersonBUri(uri: String?) {
+        _communityUiState.update { it.copy(cocreatePersonBUri = uri, errorMessage = null) }
+    }
+
+    fun clearCocreatePreview() {
+        cocreateJobPolling?.cancel()
+        cocreateJobPolling = null
+        _communityUiState.update {
+            it.copy(
+                cocreatePreviewBase64 = null,
+                cocreateCompareInputBase64 = null,
+                cocreateJobId = null,
+                cocreateJobStatus = "",
+                cocreateJobProgress = 0,
+                cocreateJobPriority = 100,
+                cocreateRetryCount = 0,
+                cocreateMaxRetries = 0,
+                cocreateNextRetryAt = null,
+                cocreateStartedAt = null,
+                cocreateHeartbeatAt = null,
+                cocreateLeaseExpiresAt = null,
+                cocreateCancelReason = "",
+                cocreateImplementationStatus = "ready",
+                cocreatePlaceholderNotes = emptyList(),
+                cocreateErrorMessage = "",
+                cocreateRequestId = "",
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun composeCocreateImage() {
+        val state = _communityUiState.value
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val referenceId = state.referencePostId
+        if (referenceId == null || referenceId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择社区参考图") }
+            return
+        }
+        if (state.cocreating) return
+        val personA = state.cocreatePersonAUri
+        val personB = state.cocreatePersonBUri
+        if (personA.isNullOrBlank() || personB.isNullOrBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先选择两张人物照片") }
+            return
+        }
+
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    cocreating = true,
+                    cocreatePreviewBase64 = null,
+                    cocreateCompareInputBase64 = null,
+                    cocreateJobId = null,
+                    cocreateJobStatus = "queued",
+                    cocreateJobProgress = 0,
+                    cocreateJobPriority = 100,
+                    cocreateRetryCount = 0,
+                    cocreateMaxRetries = 0,
+                    cocreateNextRetryAt = null,
+                    cocreateStartedAt = null,
+                    cocreateHeartbeatAt = null,
+                    cocreateLeaseExpiresAt = null,
+                    cocreateCancelReason = "",
+                    cocreateImplementationStatus = "ready",
+                    cocreatePlaceholderNotes = emptyList(),
+                    cocreateErrorMessage = "",
+                    cocreateRequestId = "",
+                    errorMessage = null,
+                )
+            }
+            try {
+                val personABase64 = encodePhotoUriToBase64(personA)
+                val personBBase64 = encodePhotoUriToBase64(personB)
+                val job = communityApiClient.createCocreateJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    referencePostId = referenceId,
+                    personAImageBase64 = personABase64,
+                    personBImageBase64 = personBBase64,
+                    strength = state.composeStrength,
+                )
+                _communityUiState.update { current ->
+                    current.copy(
+                        cocreateJobId = job.jobId,
+                        cocreateJobStatus = job.status,
+                        cocreateJobProgress = job.progress.coerceIn(0, 100),
+                        cocreateJobPriority = job.priority.coerceIn(1, 999),
+                        cocreateRetryCount = job.retryCount.coerceAtLeast(0),
+                        cocreateMaxRetries = job.maxRetries.coerceAtLeast(0),
+                        cocreateNextRetryAt = job.nextRetryAt,
+                        cocreateStartedAt = job.startedAt,
+                        cocreateHeartbeatAt = job.heartbeatAt,
+                        cocreateLeaseExpiresAt = job.leaseExpiresAt,
+                        cocreateCancelReason = job.cancelReason,
+                        cocreateRequestId = if (job.requestId.isBlank()) current.cocreateRequestId else job.requestId,
+                    )
+                }
+                launchCocreateJobPolling(job.jobId)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.cocreate.compose",
+                    throwable = e,
+                    userHint = "双人共创失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        cocreating = false,
+                        cocreateJobStatus = "failed",
+                        cocreateErrorMessage = "双人共创任务提交失败",
+                        errorMessage = "双人共创失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun retryCocreateJob() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val jobId = _communityUiState.value.cocreateJobId
+        if (jobId == null || jobId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "当前没有可重试的共创任务") }
+            return
+        }
+        viewModelScope.launch {
+            _communityUiState.update {
+                it.copy(
+                    cocreating = true,
+                    cocreateJobStatus = "queued",
+                    cocreateJobProgress = 0,
+                    cocreateNextRetryAt = null,
+                    cocreateStartedAt = null,
+                    cocreateHeartbeatAt = null,
+                    cocreateLeaseExpiresAt = null,
+                    cocreateCancelReason = "",
+                    cocreateErrorMessage = "",
+                    errorMessage = null,
+                )
+            }
+            try {
+                val retried = communityApiClient.retryCreativeJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    jobId = jobId,
+                )
+                _communityUiState.update { current ->
+                    current.copy(
+                        cocreateJobStatus = retried.status,
+                        cocreateJobProgress = retried.progress.coerceIn(0, 100),
+                        cocreateJobPriority = retried.priority.coerceIn(1, 999),
+                        cocreateRetryCount = retried.retryCount.coerceAtLeast(0),
+                        cocreateMaxRetries = retried.maxRetries.coerceAtLeast(0),
+                        cocreateNextRetryAt = retried.nextRetryAt,
+                        cocreateStartedAt = retried.startedAt,
+                        cocreateHeartbeatAt = retried.heartbeatAt,
+                        cocreateLeaseExpiresAt = retried.leaseExpiresAt,
+                        cocreateCancelReason = retried.cancelReason,
+                        cocreateRequestId = if (retried.requestId.isBlank()) current.cocreateRequestId else retried.requestId,
+                    )
+                }
+                launchCocreateJobPolling(jobId)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.cocreate.retry",
+                    throwable = e,
+                    userHint = "双人共创重试失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        cocreating = false,
+                        cocreateJobStatus = "failed",
+                        cocreateErrorMessage = "重试失败",
+                        errorMessage = "双人共创重试失败，请稍后再试",
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelCocreateJob() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        val jobId = _communityUiState.value.cocreateJobId
+        if (jobId == null || jobId <= 0) {
+            _communityUiState.update { it.copy(errorMessage = "当前没有可取消的共创任务") }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val canceled = communityApiClient.cancelCreativeJob(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    jobId = jobId,
+                )
+                cocreateJobPolling?.cancel()
+                cocreateJobPolling = null
+                _communityUiState.update { current ->
+                    current.copy(
+                        cocreating = false,
+                        cocreateJobStatus = canceled.status,
+                        cocreateJobProgress = canceled.progress.coerceIn(0, 100),
+                        cocreateJobPriority = canceled.priority.coerceIn(1, 999),
+                        cocreateRetryCount = canceled.retryCount.coerceAtLeast(0),
+                        cocreateMaxRetries = canceled.maxRetries.coerceAtLeast(0),
+                        cocreateNextRetryAt = canceled.nextRetryAt,
+                        cocreateStartedAt = canceled.startedAt,
+                        cocreateHeartbeatAt = canceled.heartbeatAt,
+                        cocreateLeaseExpiresAt = canceled.leaseExpiresAt,
+                        cocreateCancelReason = canceled.cancelReason,
+                        cocreateErrorMessage = "任务已取消",
+                        errorMessage = "已取消共创任务",
+                    )
+                }
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.cocreate.cancel",
+                    throwable = e,
+                    userHint = "取消共创任务失败",
+                )
+                _communityUiState.update {
+                    it.copy(errorMessage = "取消共创任务失败，请稍后重试")
+                }
+            }
+        }
+    }
+
+    private fun launchComposeJobPolling(jobId: Int) {
+        composeJobPolling?.cancel()
+        composeJobPolling = viewModelScope.launch {
+            while (true) {
+                val job = try {
+                    communityApiClient.getCreativeJob(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        jobId = jobId,
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    logClientError(
+                        scope = "community.compose.job.poll",
+                        throwable = e,
+                        userHint = "AI 融合任务查询失败",
+                    )
+                    _communityUiState.update {
+                        it.copy(
+                            composing = false,
+                            composeJobStatus = "failed",
+                            composeErrorMessage = "任务状态查询失败",
+                            errorMessage = "AI 融合任务状态获取失败，请稍后重试",
+                        )
+                    }
+                    return@launch
+                }
+
+                val status = job.status.lowercase()
+                _communityUiState.update { state ->
+                    state.copy(
+                        composeJobId = job.jobId,
+                        composeJobStatus = status,
+                        composeJobProgress = job.progress.coerceIn(0, 100),
+                        composeRetryCount = job.retryCount.coerceAtLeast(0),
+                        composeMaxRetries = job.maxRetries.coerceAtLeast(0),
+                        composeNextRetryAt = job.nextRetryAt,
+                        composeJobPriority = job.priority.coerceIn(1, 999),
+                        composeStartedAt = job.startedAt,
+                        composeHeartbeatAt = job.heartbeatAt,
+                        composeLeaseExpiresAt = job.leaseExpiresAt,
+                        composeCancelReason = job.cancelReason,
+                        composeImplementationStatus = job.implementationStatus,
+                        composePlaceholderNotes = job.placeholderNotes,
+                        composeErrorMessage = if (status == "failed" || status == "canceled") {
+                            if (job.errorMessage.isBlank()) "AI 融合任务失败" else job.errorMessage
+                        } else {
+                            ""
+                        },
+                        composeRequestId = if (job.requestId.isBlank()) state.composeRequestId else job.requestId,
+                    )
+                }
+
+                when (status) {
+                    "queued", "running" -> delay(1200)
+                    "success" -> {
+                        _communityUiState.update { state ->
+                            val image = job.composedImageBase64
+                            if (image.isNullOrBlank()) {
+                                state.copy(
+                                    composing = false,
+                                    composeJobStatus = "failed",
+                                    composeErrorMessage = "任务完成但未返回图片",
+                                    errorMessage = "AI 融合未返回有效图片，请重试",
+                                )
+                            } else {
+                                state.copy(
+                                    composing = false,
+                                    composedPreviewBase64 = image,
+                                    composeCompareInputBase64 = job.compareInputBase64,
+                                    errorMessage = null,
+                                )
+                            }
+                        }
+                        return@launch
+                    }
+                    "failed" -> {
+                        _communityUiState.update {
+                            it.copy(
+                                composing = false,
+                                errorMessage = if (job.errorMessage.isBlank()) "AI 融合任务失败，可重试" else job.errorMessage,
+                            )
+                        }
+                        return@launch
+                    }
+                    "canceled" -> {
+                        _communityUiState.update {
+                            it.copy(
+                                composing = false,
+                                errorMessage = "融合任务已取消",
+                            )
+                        }
+                        return@launch
+                    }
+                    else -> delay(1200)
+                }
+            }
+        }
+    }
+
+    private fun launchCocreateJobPolling(jobId: Int) {
+        cocreateJobPolling?.cancel()
+        cocreateJobPolling = viewModelScope.launch {
+            while (true) {
+                val job = try {
+                    communityApiClient.getCreativeJob(
+                        serverUrl = _uiState.value.settings.serverUrl,
+                        bearerToken = bearerToken,
+                        jobId = jobId,
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    logClientError(
+                        scope = "community.cocreate.job.poll",
+                        throwable = e,
+                        userHint = "双人共创任务查询失败",
+                    )
+                    _communityUiState.update {
+                        it.copy(
+                            cocreating = false,
+                            cocreateJobStatus = "failed",
+                            cocreateErrorMessage = "任务状态查询失败",
+                            errorMessage = "双人共创任务状态获取失败，请稍后重试",
+                        )
+                    }
+                    return@launch
+                }
+
+                val status = job.status.lowercase()
+                _communityUiState.update { state ->
+                    state.copy(
+                        cocreateJobId = job.jobId,
+                        cocreateJobStatus = status,
+                        cocreateJobProgress = job.progress.coerceIn(0, 100),
+                        cocreateRetryCount = job.retryCount.coerceAtLeast(0),
+                        cocreateMaxRetries = job.maxRetries.coerceAtLeast(0),
+                        cocreateNextRetryAt = job.nextRetryAt,
+                        cocreateJobPriority = job.priority.coerceIn(1, 999),
+                        cocreateStartedAt = job.startedAt,
+                        cocreateHeartbeatAt = job.heartbeatAt,
+                        cocreateLeaseExpiresAt = job.leaseExpiresAt,
+                        cocreateCancelReason = job.cancelReason,
+                        cocreateImplementationStatus = job.implementationStatus,
+                        cocreatePlaceholderNotes = job.placeholderNotes,
+                        cocreateErrorMessage = if (status == "failed" || status == "canceled") {
+                            if (job.errorMessage.isBlank()) "双人共创任务失败" else job.errorMessage
+                        } else {
+                            ""
+                        },
+                        cocreateRequestId = if (job.requestId.isBlank()) state.cocreateRequestId else job.requestId,
+                    )
+                }
+
+                when (status) {
+                    "queued", "running" -> delay(1200)
+                    "success" -> {
+                        _communityUiState.update { state ->
+                            val image = job.composedImageBase64
+                            if (image.isNullOrBlank()) {
+                                state.copy(
+                                    cocreating = false,
+                                    cocreateJobStatus = "failed",
+                                    cocreateErrorMessage = "任务完成但未返回图片",
+                                    errorMessage = "双人共创未返回有效图片，请重试",
+                                )
+                            } else {
+                                state.copy(
+                                    cocreating = false,
+                                    cocreatePreviewBase64 = image,
+                                    cocreateCompareInputBase64 = job.compareInputBase64,
+                                    errorMessage = null,
+                                )
+                            }
+                        }
+                        return@launch
+                    }
+                    "failed" -> {
+                        _communityUiState.update {
+                            it.copy(
+                                cocreating = false,
+                                errorMessage = if (job.errorMessage.isBlank()) "双人共创任务失败，可重试" else job.errorMessage,
+                            )
+                        }
+                        return@launch
+                    }
+                    "canceled" -> {
+                        _communityUiState.update {
+                            it.copy(
+                                cocreating = false,
+                                errorMessage = "共创任务已取消",
+                            )
+                        }
+                        return@launch
+                    }
+                    else -> delay(1200)
+                }
+            }
+        }
+    }
+
+    fun saveCocreatePreviewToGallery(onSaved: (String?) -> Unit = {}) {
+        val preview = _communityUiState.value.cocreatePreviewBase64
+        if (preview.isNullOrBlank()) {
+            onSaved(null)
+            return
+        }
+        viewModelScope.launch {
+            val uri = try {
+                saveBase64ToGallery(preview, "CamMate_Cocreate")
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.cocreate.save",
+                    throwable = e,
+                    userHint = "双人共创结果保存失败",
+                )
+                null
+            }
+            onSaved(uri)
+        }
+    }
+
     private fun encodePhotoUriToBase64(photoUri: String): String {
         val app = getApplication<Application>()
         val uri = Uri.parse(photoUri)
-        val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val resolver = app.contentResolver
+        val originalBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalStateException("无法读取原图")
-        if (bytes.isEmpty()) {
+        if (originalBytes.isEmpty()) {
             throw IllegalStateException("原图内容为空")
+        }
+        val source = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size)
+            ?: throw IllegalStateException("无法解析所选图片")
+        val maxSide = 1600
+        val longestSide = maxOf(source.width, source.height).coerceAtLeast(1)
+        val scaled = if (longestSide <= maxSide) {
+            source
+        } else {
+            val scale = maxSide.toFloat() / longestSide.toFloat()
+            Bitmap.createScaledBitmap(
+                source,
+                (source.width * scale).toInt().coerceAtLeast(1),
+                (source.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        }
+        val output = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 88, output)
+        if (scaled !== source) {
+            scaled.recycle()
+        }
+        source.recycle()
+        val bytes = output.toByteArray()
+        if (bytes.isEmpty()) {
+            throw IllegalStateException("发布图片压缩失败")
         }
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
@@ -1328,6 +2775,92 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appLogger.i(TAG, "[$scope] $message")
     }
 
+    private fun syncCommunityAuthHeader() {
+        _communityUiState.update {
+            it.copy(
+                authHeader = if (bearerToken.isNotBlank()) "Bearer $bearerToken" else "",
+            )
+        }
+    }
+
+    private fun CommunityPostDto.toCommunityPost(serverUrl: String): CommunityPostItem {
+        val relaySummary = relayParentSummary?.let { relay ->
+            CommunityRelayParentItem(
+                id = relay.id,
+                userNickname = relay.userNickname,
+                placeTag = relay.placeTag,
+                sceneType = relay.sceneType,
+                imageUrl = buildAbsoluteImageUrl(serverUrl = serverUrl, imagePath = relay.imageUrl),
+            )
+        }
+        return CommunityPostItem(
+            id = id,
+            userId = userId,
+            userNickname = userNickname,
+            feedbackId = feedbackId,
+            imageUrl = buildAbsoluteImageUrl(serverUrl = serverUrl, imagePath = imageUrl),
+            sceneType = sceneType,
+            placeTag = placeTag,
+            rating = rating.coerceIn(0, 5),
+            reviewText = reviewText,
+            caption = caption,
+            postType = postType,
+            sourceType = sourceType,
+            likeCount = likeCount.coerceAtLeast(0),
+            commentCount = commentCount.coerceAtLeast(0),
+            likedByMe = likedByMe,
+            styleTemplatePostId = styleTemplatePostId,
+            relayParentSummary = relaySummary,
+            createdAt = createdAt,
+        )
+    }
+
+    private fun CommunityCommentDto.toCommunityComment(): CommunityCommentItem {
+        return CommunityCommentItem(
+            id = id,
+            postId = postId,
+            userId = userId,
+            userNickname = userNickname,
+            text = text,
+            createdAt = createdAt,
+            canDelete = canDelete,
+        )
+    }
+
+    private fun CommunityRemakeGuideDto.toCommunityRemakeGuide(serverUrl: String): CommunityRemakeGuide {
+        return CommunityRemakeGuide(
+            templatePost = templatePost.toCommunityPost(serverUrl = serverUrl),
+            shotScript = shotScript,
+            cameraHint = cameraHint,
+            poseHint = poseHint,
+            framingHint = framingHint,
+            timingHint = timingHint,
+            alignmentChecks = alignmentChecks,
+            implementationStatus = implementationStatus,
+            placeholderNotes = placeholderNotes,
+        )
+    }
+
+    private fun CommunityRemakeAnalysisDto.toCommunityRemakeAnalysis(): CommunityRemakeAnalysis {
+        return CommunityRemakeAnalysis(
+            templatePostId = templatePostId,
+            poseScore = poseScore.coerceIn(0f, 1f),
+            framingScore = framingScore.coerceIn(0f, 1f),
+            alignmentScore = alignmentScore.coerceIn(0f, 1f),
+            mismatchHints = mismatchHints,
+            implementationStatus = implementationStatus,
+            placeholderNotes = placeholderNotes,
+        )
+    }
+
+    private fun buildAbsoluteImageUrl(serverUrl: String, imagePath: String): String {
+        val trimmed = imagePath.trim()
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
+        val prefix = serverUrl.trimEnd('/')
+        val suffix = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        return prefix + suffix
+    }
+
     fun updateServerUrl(value: String) {
         viewModelScope.launch { settingsRepository.updateServerUrl(value) }
     }
@@ -1390,6 +2923,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         currentAnalyzeJob?.cancel()
+        composeJobPolling?.cancel()
+        cocreateJobPolling?.cancel()
         ttsSpeaker?.shutdown()
         ttsSpeaker = null
         super.onCleared()
