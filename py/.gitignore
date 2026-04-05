@@ -13,6 +13,9 @@ app_data.db
 app_data.db-journal
 app_data.db-wal
 app_data.db-shm
+demo_app_data.db-journal
+demo_app_data.db-wal
+demo_app_data.db-shm
 uploads/
 logs/
 creative_results/
