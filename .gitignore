@@ -211,3 +211,6 @@ __marimo__/
 
 # Local source photos for demo asset generation.
 Pictures/
+.gradle/
+.gradle-local/
+.gradle-verify-2/
