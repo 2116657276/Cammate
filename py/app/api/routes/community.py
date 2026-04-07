@@ -108,6 +108,14 @@ async def unlike_post(
     return community_service.unlike_post(current_user.id, post_id)
 
 
+@router.delete("/posts/{post_id}", response_model=CommunityDeleteResponse)
+async def delete_post(
+    post_id: int,
+    current_user: AuthUser = Depends(require_user),
+) -> CommunityDeleteResponse:
+    return community_service.delete_post(user_id=current_user.id, post_id=post_id)
+
+
 @router.get("/posts/{post_id}/comments", response_model=CommunityCommentsResponse)
 async def comments(
     post_id: int,

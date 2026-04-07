@@ -86,6 +86,7 @@ mamba run -n Cam python -m pip install -r py/requirements.txt
 推荐统一使用下面这条命令：
 
 ```bash
+uvicorn main:app --host 0.0.0.0 --port 8010
 mamba run -n Cam python py/scripts/run_api_server.py
 ```
 
@@ -126,12 +127,19 @@ PYTHONPATH=py APP_DB_PATH=py/demo_app_data.db mamba run -n Cam python py/scripts
 1. 用 Android Studio 打开 `kotlin/`
 2. 等待 Gradle Sync 完成
 3. 运行 `app`
-4. 在设置页确认服务端地址
+4. 在 `kotlin/local.properties` 里设置 `cammate.server.url`
+5. 如有需要，再在设置页确认或覆盖服务端地址
 
 常用地址：
 
 - 模拟器：`http://10.0.2.2:8010`
 - 真机：`http://<你的局域网 IP>:8010`
+
+本地切换建议：
+
+- 模拟器联调：`cammate.server.url=http://10.0.2.2:8080`
+- 真机联调：`cammate.server.url=http://<你的局域网 IP>:8080`
+- `local.properties` 已被 `.gitignore` 忽略，适合保存你本机的默认服务端地址
 
 ## 6. 日志与排障入口
 

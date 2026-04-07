@@ -106,13 +106,13 @@ class CommunityPublishRequest(BaseModel):
     feedback_id: int = Field(ge=1)
     image_base64: str = Field(min_length=16)
     place_tag: str = Field(default="", max_length=48)
-    scene_type: Literal["portrait", "general", "landscape", "food", "night"] | None = "general"
+    scene_type: Literal["portrait", "general", "landscape", "food", "night", "pet", "flower"] | None = "general"
 
 
 class CommunityDirectPublishRequest(BaseModel):
     image_base64: str = Field(min_length=16)
     place_tag: str = Field(default="", max_length=48)
-    scene_type: Literal["portrait", "general", "landscape", "food", "night"] | None = "general"
+    scene_type: Literal["portrait", "general", "landscape", "food", "night", "pet", "flower"] | None = "general"
     caption: str = Field(default="", max_length=280)
     review_text: str = Field(default="", max_length=280)
     rating: int | None = Field(default=None, ge=1, le=5)
@@ -124,7 +124,7 @@ class CommunityDirectPublishRequest(BaseModel):
 class CommunityRelayPublishRequest(BaseModel):
     image_base64: str = Field(min_length=16)
     place_tag: str = Field(default="", max_length=48)
-    scene_type: Literal["portrait", "general", "landscape", "food", "night"] | None = "general"
+    scene_type: Literal["portrait", "general", "landscape", "food", "night", "pet", "flower"] | None = "general"
     caption: str = Field(default="", max_length=280)
     review_text: str = Field(default="", max_length=280)
     rating: int | None = Field(default=None, ge=1, le=5)

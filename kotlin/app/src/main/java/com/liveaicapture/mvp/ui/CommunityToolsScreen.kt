@@ -37,6 +37,8 @@ private val toolScenes = listOf(
     ToolSceneOption(raw = "landscape", label = "风景"),
     ToolSceneOption(raw = "food", label = "美食"),
     ToolSceneOption(raw = "night", label = "夜景"),
+    ToolSceneOption(raw = "pet", label = "宠物"),
+    ToolSceneOption(raw = "flower", label = "花草"),
 )
 
 @Composable

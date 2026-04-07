@@ -58,11 +58,10 @@ fun LoginScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("欢迎使用 CamMate", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    text = "登录后开始 AI 辅助拍摄",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.secondary,
+                    "CamMate",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
                 )
                 SectionCard {
                     OutlinedTextField(
@@ -83,11 +82,11 @@ fun LoginScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("密码（至少 6 位）") },
+                        label = { Text("密码") },
                     )
 
                     authState.errorMessage?.let {
-                        Text(it, color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                        Text(it, color = Color(0xFFB42318))
                     }
 
                     Button(
@@ -99,7 +98,7 @@ fun LoginScreen(
                     }
 
                     TextButton(onClick = openRegister, modifier = Modifier.fillMaxWidth()) {
-                        Text("没有账号？去注册")
+                        Text("去注册")
                     }
                 }
             }

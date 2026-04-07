@@ -14,20 +14,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.liveaicapture.mvp.ui.CameraScreen
+import com.liveaicapture.mvp.ui.CommunityPostDetailScreen
 import com.liveaicapture.mvp.ui.CommunityPublishScreen
 import com.liveaicapture.mvp.ui.CommunityScreen
 import com.liveaicapture.mvp.ui.CommunityToolsScreen
+import com.liveaicapture.mvp.ui.EditProfileScreen
 import com.liveaicapture.mvp.ui.FeedbackScreen
 import com.liveaicapture.mvp.ui.HomeScreen
 import com.liveaicapture.mvp.ui.AiComposeScreen
 import com.liveaicapture.mvp.ui.LoginScreen
+import com.liveaicapture.mvp.ui.LikedPostsScreen
 import com.liveaicapture.mvp.ui.MainViewModel
 import com.liveaicapture.mvp.ui.PoseRecommendScreen
+import com.liveaicapture.mvp.ui.PoseReferenceDetailScreen
 import com.liveaicapture.mvp.ui.RegisterScreen
 import com.liveaicapture.mvp.ui.RetouchScreen
 import com.liveaicapture.mvp.ui.SettingsScreen
@@ -58,6 +64,11 @@ fun CamMateApp() {
             restoreState = true
         }
     }
+    val openCamera: () -> Unit = {
+        navController.navigate("camera") {
+            launchSingleTop = true
+        }
+    }
     val openCommunity: () -> Unit = {
         navController.navigate("community") {
             launchSingleTop = true
@@ -68,6 +79,19 @@ fun CamMateApp() {
         navController.navigate("settings") {
             launchSingleTop = true
             restoreState = true
+        }
+    }
+    val openAiComposeWithPost: (Int) -> Unit = { postId ->
+        vm.startRelayFromPost(postId)
+        navController.navigate("community_publish") {
+            launchSingleTop = true
+        }
+    }
+    val openPoseRecommendWithPost: (Int) -> Unit = { postId ->
+        vm.selectCommunityReferencePost(postId)
+        vm.requestRemakeGuide(postId)
+        navController.navigate("pose_recommend_detail/$postId") {
+            launchSingleTop = true
         }
     }
 
@@ -122,7 +146,8 @@ fun CamMateApp() {
         }
         composable("home") {
             HomeScreen(
-                openCamera = { navController.navigate("camera") },
+                viewModel = vm,
+                openCamera = openCamera,
                 openPoseRecommend = { navController.navigate("pose_recommend") },
                 openAiCompose = { navController.navigate("ai_compose") },
                 openCommunity = openCommunity,
@@ -146,12 +171,42 @@ fun CamMateApp() {
             PoseRecommendScreen(
                 viewModel = vm,
                 onBackToCapture = openHome,
+                openPostDetail = { postId -> navController.navigate("pose_recommend_detail/$postId") },
+            )
+        }
+        composable(
+            route = "pose_recommend_detail/{postId}",
+            arguments = listOf(navArgument("postId") { type = NavType.IntType }),
+        ) { entry ->
+            val postId = entry.arguments?.getInt("postId") ?: 0
+            PoseReferenceDetailScreen(
+                viewModel = vm,
+                postId = postId,
+                onBack = { navController.popBackStack() },
             )
         }
         composable("ai_compose") {
             AiComposeScreen(
                 viewModel = vm,
                 onBackToCapture = openHome,
+                onOpenCommunityPicker = { navController.navigate("community_picker") },
+            )
+        }
+        composable("community_picker") {
+            CommunityScreen(
+                viewModel = vm,
+                openCapture = { navController.popBackStack() },
+                openCamera = openCamera,
+                openSettings = openSettings,
+                openPublish = {},
+                openPostDetail = { _ -> },
+                openAiComposeWithPost = { _ -> },
+                openPoseRecommendWithPost = { _ -> },
+                pickerMode = true,
+                onPickReference = { postId ->
+                    vm.selectCommunityReferencePost(postId)
+                    navController.popBackStack()
+                },
             )
         }
         composable("settings") {
@@ -159,6 +214,25 @@ fun CamMateApp() {
                 viewModel = vm,
                 openHome = openHome,
                 openCommunity = openCommunity,
+                openCamera = openCamera,
+                openPublish = { navController.navigate("community_publish") },
+                openEditProfile = { navController.navigate("edit_profile") },
+                openLikedPosts = { navController.navigate("liked_posts") },
+                openPostDetail = { postId -> navController.navigate("community_post/$postId") },
+            )
+        }
+        composable("edit_profile") {
+            EditProfileScreen(
+                viewModel = vm,
+                onBack = { navController.popBackStack() },
+                openCamera = openCamera,
+            )
+        }
+        composable("liked_posts") {
+            LikedPostsScreen(
+                viewModel = vm,
+                onBack = { navController.popBackStack() },
+                openPostDetail = { postId -> navController.navigate("community_post/$postId") },
             )
         }
         composable("retouch") {
@@ -184,15 +258,40 @@ fun CamMateApp() {
                         launchSingleTop = true
                     }
                 },
+                onBack = {
+                    vm.dismissFeedbackScreen()
+                    if (!navController.popBackStack()) {
+                        navController.navigate("camera") {
+                            popUpTo("camera") { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    }
+                },
             )
         }
         composable("community") {
             CommunityScreen(
                 viewModel = vm,
                 openCapture = openHome,
+                openCamera = openCamera,
                 openSettings = openSettings,
                 openPublish = { navController.navigate("community_publish") },
-                openTools = { navController.navigate("community_tools") },
+                openPostDetail = { postId -> navController.navigate("community_post/$postId") },
+                openAiComposeWithPost = openAiComposeWithPost,
+                openPoseRecommendWithPost = openPoseRecommendWithPost,
+            )
+        }
+        composable(
+            route = "community_post/{postId}",
+            arguments = listOf(navArgument("postId") { type = NavType.IntType }),
+        ) { entry ->
+            val postId = entry.arguments?.getInt("postId") ?: 0
+            CommunityPostDetailScreen(
+                viewModel = vm,
+                postId = postId,
+                onBackToCommunity = { navController.popBackStack() },
+                openAiComposeWithPost = openAiComposeWithPost,
+                openPoseRecommendWithPost = openPoseRecommendWithPost,
             )
         }
         composable("community_publish") {
@@ -201,6 +300,12 @@ fun CamMateApp() {
                 onBackToCommunity = {
                     if (!navController.popBackStack()) {
                         openCommunity()
+                    }
+                },
+                onPublishedToCommunityHome = {
+                    navController.navigate("community") {
+                        popUpTo("community") { inclusive = false }
+                        launchSingleTop = true
                     }
                 },
             )
@@ -231,7 +336,7 @@ fun SplashScreen() {
             Text(
                 text = "CamMate",
                 style = MaterialTheme.typography.headlineLarge,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
     }

@@ -4,85 +4,89 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.liveaicapture.mvp.data.CommunityPostItem
-import com.liveaicapture.mvp.ui.components.CamMatePage
-import com.liveaicapture.mvp.ui.components.SectionCard
 import okhttp3.Headers
-
-private data class ComposeSceneOption(
-    val raw: String,
-    val label: String,
-)
-
-private val composeScenes = listOf(
-    ComposeSceneOption(raw = "general", label = "通用"),
-    ComposeSceneOption(raw = "portrait", label = "人像"),
-    ComposeSceneOption(raw = "landscape", label = "风景"),
-    ComposeSceneOption(raw = "food", label = "美食"),
-    ComposeSceneOption(raw = "night", label = "夜景"),
-)
 
 @Composable
 fun AiComposeScreen(
     viewModel: MainViewModel,
     onBackToCapture: () -> Unit,
+    onOpenCommunityPicker: () -> Unit,
 ) {
     val context = LocalContext.current
     val authState by viewModel.authUiState.collectAsStateWithLifecycle()
     val state by viewModel.communityUiState.collectAsStateWithLifecycle()
-    var placeInput by rememberSaveable(state.recommendationPlaceTag) {
-        mutableStateOf(state.recommendationPlaceTag)
-    }
-    val imagePicker = rememberLauncherForActivityResult(
+    var localSceneUri by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val personPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
     ) { uri ->
         viewModel.updateCommunityPersonImageUri(uri?.toString())
+    }
+    val scenePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+    ) { uri ->
+        localSceneUri = uri?.toString()
+        viewModel.selectCommunityReferencePost(null)
     }
 
     LaunchedEffect(authState.authenticated) {
@@ -100,291 +104,575 @@ fun AiComposeScreen(
         }
     }
 
-    CamMatePage(
-        title = "AI 融合",
-        subtitle = "选参考图、上传人物照，直接发起融合任务。",
-        onBack = onBackToCapture,
-        backText = "返回拍摄分栏",
-    ) {
-        item {
-            SectionCard {
-                Text("融合设置", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    text = "参考图 ID：${state.referencePostId ?: "未选择"}",
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-                Button(
-                    onClick = { imagePicker.launch("image/*") },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (state.personImageUri.isNullOrBlank()) "选择人物照片" else "更换人物照片")
-                }
-                state.personImageUri?.takeIf { it.isNotBlank() }?.let {
-                    Text("人物图：$it", color = MaterialTheme.colorScheme.secondary)
-                }
-                Text("融合强度 ${"%.0f".format(state.composeStrength * 100)}%")
-                Slider(
-                    value = state.composeStrength,
-                    onValueChange = { viewModel.updateCommunityComposeStrength(it) },
-                    valueRange = 0f..1f,
-                )
-                Button(
-                    onClick = { viewModel.composeCommunityImage() },
-                    enabled = !state.composing,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        if (state.composing) {
-                            "融合任务进行中 ${state.composeJobProgress.coerceIn(0, 100)}%"
-                        } else {
-                            "开始 AI 融合"
-                        },
-                    )
-                }
-                if (state.composeJobStatus.isNotBlank()) {
-                    Text("任务状态：${state.composeJobStatus} · ${state.composeJobProgress.coerceIn(0, 100)}%")
-                    if (state.composeJobStatus == "queued" || state.composeJobStatus == "running") {
-                        LinearProgressIndicator(
-                            progress = { state.composeJobProgress.coerceIn(0, 100) / 100f },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        TextButton(onClick = { viewModel.cancelComposeJob() }) {
-                            Text("取消融合任务")
-                        }
-                    }
-                    if (state.composeJobStatus == "failed") {
-                        state.composeErrorMessage.takeIf { it.isNotBlank() }?.let {
-                            Text(it, color = Color(0xFFE76F51))
-                        }
-                        TextButton(onClick = { viewModel.retryComposeJob() }) {
-                            Text("重试融合任务")
-                        }
-                    }
-                    if (state.composeImplementationStatus == "placeholder") {
-                        Text("当前使用本地占位输出，适合演示链路。", color = Color(0xFFF4A261))
-                    }
-                }
-            }
-        }
+    val recommendedPosts = remember(state.recommendations, state.feed) {
+        state.recommendations.map { it.post }.ifEmpty { state.feed }.take(6)
+    }
+    val selectedCommunityPost = remember(state.referencePostId, state.recommendations, state.feed) {
+        val selectedId = state.referencePostId ?: return@remember null
+        state.recommendations.firstOrNull { it.post.id == selectedId }?.post
+            ?: state.feed.firstOrNull { it.id == selectedId }
+    }
+    val showComposeDialog = state.composing ||
+        state.composeJobStatus == "queued" ||
+        state.composeJobStatus == "running" ||
+        state.composeJobStatus == "failed" ||
+        !state.composedPreviewBase64.isNullOrBlank()
+    val isGenerating = state.composing || state.composeJobStatus == "queued" || state.composeJobStatus == "running"
 
-        item {
-            SectionCard {
-                Text("场景筛选", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    value = placeInput,
-                    onValueChange = {
-                        placeInput = it
-                        viewModel.updateRecommendationPlaceTag(it)
-                    },
-                    label = { Text("地点标签") },
-                    placeholder = { Text("例如：天台、街角、餐厅") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
+    BackHandler(enabled = showComposeDialog && !isGenerating) {
+        viewModel.clearComposedPreview()
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                ComposeHeader(
+                    onBackToCapture = onBackToCapture,
+                    modifier = Modifier.padding(top = 28.dp),
                 )
-                Row(
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(top = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    composeScenes.forEach { scene ->
-                        FilterChip(
-                            selected = state.recommendationSceneType == scene.raw,
-                            onClick = { viewModel.updateRecommendationSceneType(scene.raw) },
-                            label = { Text(scene.label) },
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        ComposeImageSlot(
+                            modifier = Modifier.weight(1f),
+                            imageModel = state.personImageUri,
+                            authHeader = "",
+                            placeholder = "人物图片",
+                        )
+                        ComposeImageSlot(
+                            modifier = Modifier.weight(1f),
+                            imageModel = selectedCommunityPost?.imageUrl ?: localSceneUri,
+                            authHeader = if (selectedCommunityPost != null) state.authHeader else "",
+                            placeholder = "场景图片",
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        ComposePrimaryActionButton(
+                            onClick = { personPicker.launch("image/*") },
+                            modifier = Modifier.weight(1f),
+                            icon = Icons.Outlined.PhotoLibrary,
+                            label = "选择人物图",
+                            contentDescription = "从图库中选择人物图片",
+                        )
+
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            ComposeSecondaryActionButton(
+                                onClick = { scenePicker.launch("image/*") },
+                                modifier = Modifier.fillMaxWidth(),
+                                icon = Icons.Outlined.PhotoLibrary,
+                                label = "本地场景图",
+                                contentDescription = "选择本地场景图",
+                            )
+                            ComposeSecondaryActionButton(
+                                onClick = onOpenCommunityPicker,
+                                modifier = Modifier.fillMaxWidth(),
+                                icon = Icons.Outlined.Forum,
+                                label = "社区场景图",
+                                contentDescription = "进入社区选择场景图",
+                            )
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 28.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(
+                            text = "为你推荐",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 6.dp, bottom = 2.dp),
+                        )
+                        RecommendationStrip(
+                            posts = recommendedPosts,
+                            authHeader = state.authHeader,
+                            selectedPostId = state.referencePostId,
+                            onSelect = { postId ->
+                                localSceneUri = null
+                                viewModel.selectCommunityReferencePost(postId)
+                            },
                         )
                     }
                 }
-                Button(
-                    onClick = { viewModel.refreshRecommendations() },
-                    enabled = !state.loadingRecommendations,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (state.loadingRecommendations) "推荐中..." else "刷新参考推荐")
-                }
+
+                Spacer(modifier = Modifier.weight(1f))
+            }
+
+            Button(
+                onClick = { viewModel.composeCommunityImage() },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(0.76f)
+                    .padding(bottom = 4.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            ) {
+                SingleLineButtonText(
+                    text = "开始生成",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
+    }
 
-        item {
-            SectionCard {
-                Text("选择参考图", style = MaterialTheme.typography.titleMedium)
-                if (state.loadingRecommendations && state.recommendations.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
+    if (showComposeDialog) {
+        ComposeProgressDialog(
+            previewBase64 = state.composedPreviewBase64,
+            progress = state.composeJobProgress.coerceIn(0, 100) / 100f,
+            isGenerating = isGenerating,
+            errorMessage = state.composeErrorMessage.takeIf { it.isNotBlank() },
+            onSave = {
+                viewModel.saveComposedPreviewToGallery { uri ->
+                    if (uri.isNullOrBlank()) {
+                        Toast.makeText(context, "保存失败，请重试", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "已保存到系统图库", Toast.LENGTH_SHORT).show()
                     }
-                } else if (state.recommendations.isEmpty() && state.feed.isEmpty()) {
-                    Text("还没有可选参考图，请稍后刷新。", color = MaterialTheme.colorScheme.secondary)
+                }
+            },
+            onReturn = { viewModel.clearComposedPreview() },
+        )
+    }
+}
+
+@Composable
+private fun ComposeHeader(
+    onBackToCapture: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "虚拟打卡",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        IconButton(onClick = onBackToCapture) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                contentDescription = "返回",
+                tint = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ComposeImageSlot(
+    modifier: Modifier,
+    imageModel: String?,
+    authHeader: String,
+    placeholder: String,
+) {
+    val context = LocalContext.current
+    val request = remember(imageModel, authHeader) {
+        imageModel?.let { value ->
+            ImageRequest.Builder(context)
+                .data(value)
+                .crossfade(true)
+                .headers(
+                    Headers.Builder().apply {
+                        if (authHeader.isNotBlank() && value.startsWith("http")) {
+                            add("Authorization", authHeader)
+                        }
+                    }.build(),
+                )
+                .build()
+        }
+    }
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        tonalElevation = 2.dp,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.72f)
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.26f),
+                    shape = RoundedCornerShape(20.dp),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (request == null) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "+",
+                        style = MaterialTheme.typography.displaySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = placeholder,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                AsyncImage(
+                    model = request,
+                    contentDescription = placeholder,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(20.dp)),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposePrimaryActionButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector,
+    label: String,
+    contentDescription: String,
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.defaultMinSize(minHeight = 54.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(18.dp),
+            )
+            SingleLineButtonText(label)
+        }
+    }
+}
+
+@Composable
+private fun ComposeSecondaryActionButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector,
+    label: String,
+    contentDescription: String,
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.defaultMinSize(minHeight = 50.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+            contentColor = MaterialTheme.colorScheme.primary,
+        ),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(18.dp),
+            )
+            SingleLineButtonText(label)
+        }
+    }
+}
+
+@Composable
+private fun SingleLineButtonText(
+    text: String,
+    style: TextStyle? = null,
+    fontWeight: FontWeight? = FontWeight.Medium,
+) {
+    Text(
+        text = text,
+        style = style ?: MaterialTheme.typography.labelLarge,
+        fontWeight = fontWeight,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun RecommendationStrip(
+    posts: List<CommunityPostItem>,
+    authHeader: String,
+    selectedPostId: Int?,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        repeat(6) { index ->
+            val post = posts.getOrNull(index)
+            if (post == null) {
+                EmptyRecommendationSlot()
+            } else {
+                RecommendationThumbnail(
+                    post = post,
+                    authHeader = authHeader,
+                    selected = post.id == selectedPostId,
+                    onClick = { onSelect(post.id) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyRecommendationSlot() {
+    Surface(
+        modifier = Modifier.width(144.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(182.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "+",
+                style = MaterialTheme.typography.headlineLarge,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecommendationThumbnail(
+    post: CommunityPostItem,
+    authHeader: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    val request = remember(post.imageUrl, authHeader) {
+        ImageRequest.Builder(context)
+            .data(post.imageUrl)
+            .crossfade(true)
+            .headers(
+                Headers.Builder().apply {
+                    if (authHeader.isNotBlank()) {
+                        add("Authorization", authHeader)
+                    }
+                }.build(),
+            )
+            .build()
+    }
+
+    Box(
+        modifier = Modifier
+            .width(144.dp)
+            .height(182.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        state.recommendations.map { it.post }.ifEmpty { state.feed.take(8) }.forEach { post ->
-                            ComposeReferenceCard(
-                                post = post,
-                                authHeader = state.authHeader,
-                                selected = state.referencePostId == post.id,
-                                onSelect = { viewModel.selectCommunityReferencePost(post.id) },
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)
+                },
+                shape = RoundedCornerShape(16.dp),
+            )
+            .clickable(onClick = onClick),
+    ) {
+        AsyncImage(
+            model = request,
+            contentDescription = "recommendation-${post.id}",
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+    }
+}
+
+@Composable
+private fun ComposeProgressDialog(
+    previewBase64: String?,
+    progress: Float,
+    isGenerating: Boolean,
+    errorMessage: String?,
+    onSave: () -> Unit,
+    onReturn: () -> Unit,
+) {
+    Dialog(onDismissRequest = {}) {
+        Surface(
+            shape = RoundedCornerShape(28.dp),
+            tonalElevation = 10.dp,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.surface,
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            ),
+                        ),
+                    )
+                    .padding(horizontal = 18.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = when {
+                        isGenerating -> "生成中"
+                        !previewBase64.isNullOrBlank() -> "虚拟打卡照片"
+                        else -> "生成结果"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+
+                LinearProgressIndicator(
+                    progress = { if (!previewBase64.isNullOrBlank()) 1f else progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                when {
+                    isGenerating -> {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 18.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = "正在生成虚拟打卡照片",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = "系统会自动合成人物和场景，请稍等片刻",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    text = "${(progress.coerceIn(0f, 1f) * 100).toInt()}%",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                    }
+
+                    !previewBase64.isNullOrBlank() -> {
+                        ComposeBase64Preview(
+                            base64Data = previewBase64,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(304.dp),
+                        )
+                    }
+
+                    else -> {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.58f),
+                        ) {
+                            Text(
+                                text = errorMessage ?: "生成失败，请返回后重试",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(14.dp),
+                                textAlign = TextAlign.Start,
                             )
                         }
                     }
                 }
-            }
-        }
 
-        state.composedPreviewBase64?.let { after ->
-            item {
-                SectionCard {
-                    Text("融合结果", style = MaterialTheme.typography.titleMedium)
-                    val before = state.composeCompareInputBase64
-                    if (!before.isNullOrBlank()) {
-                        ComposeBeforeAfterSlider(
-                            beforeBase64 = before,
-                            afterBase64 = after,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(260.dp),
-                        )
-                    } else {
-                        ComposeBase64Preview(
-                            base64Data = after,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(260.dp),
-                        )
-                    }
+                if (!isGenerating) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Button(
-                            onClick = {
-                                viewModel.saveComposedPreviewToGallery { uri ->
-                                    Toast.makeText(
-                                        context,
-                                        if (uri.isNullOrBlank()) "保存失败" else "已保存到相册",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("保存到相册")
+                        if (!previewBase64.isNullOrBlank()) {
+                            Button(
+                                onClick = onSave,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(14.dp),
+                            ) {
+                                SingleLineButtonText("保存")
+                            }
                         }
-                        TextButton(
-                            onClick = { viewModel.clearComposedPreview() },
+                        Button(
+                            onClick = onReturn,
                             modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            ),
                         ) {
-                            Text("清除预览")
+                            SingleLineButtonText("返回")
                         }
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun ComposeReferenceCard(
-    post: CommunityPostItem,
-    authHeader: String,
-    selected: Boolean,
-    onSelect: () -> Unit,
-) {
-    val context = LocalContext.current
-    val request = ImageRequest.Builder(context)
-        .data(post.imageUrl)
-        .crossfade(true)
-        .headers(
-            Headers.Builder().apply {
-                if (authHeader.isNotBlank()) {
-                    add("Authorization", authHeader)
-                }
-            }.build(),
-        )
-        .build()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(16.dp))
-            .clickable(onClick = onSelect)
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        AsyncImage(
-            model = request,
-            contentDescription = "compose-reference-${post.id}",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(180.dp),
-            contentScale = ContentScale.Crop,
-        )
-        Text(
-            text = if (selected) "已选参考 #${post.id}" else "参考 #${post.id}",
-            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-        )
-        Text(
-            text = "${post.placeTag} · ${composeSceneLabel(post.sceneType)} · ${post.likeCount} 赞",
-            color = MaterialTheme.colorScheme.secondary,
-        )
-        Button(onClick = onSelect, modifier = Modifier.fillMaxWidth()) {
-            Text(if (selected) "当前已选" else "设为融合参考")
-        }
-    }
-}
-
-private fun composeSceneLabel(raw: String): String {
-    return composeScenes.firstOrNull { it.raw == raw.lowercase() }?.label ?: raw
-}
-
-@Composable
-private fun ComposeBeforeAfterSlider(
-    beforeBase64: String,
-    afterBase64: String,
-    modifier: Modifier = Modifier,
-) {
-    var split by rememberSaveable { mutableFloatStateOf(0.5f) }
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-        ) {
-            val width = maxWidth
-            ComposeBase64Preview(
-                base64Data = beforeBase64,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Box(
-                modifier = Modifier
-                    .width(width * split)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(0.dp)),
-            ) {
-                ComposeBase64Preview(
-                    base64Data = afterBase64,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .width(2.dp)
-                    .fillMaxHeight()
-                    .background(Color(0xFFF4A261))
-                    .align(Alignment.CenterStart),
-            )
-        }
-        Slider(
-            value = split,
-            onValueChange = { split = it.coerceIn(0.1f, 0.9f) },
-            valueRange = 0.1f..0.9f,
-        )
     }
 }
 
@@ -393,29 +681,38 @@ private fun ComposeBase64Preview(
     base64Data: String,
     modifier: Modifier = Modifier,
 ) {
-    val decoded = androidx.compose.runtime.remember(base64Data) {
+    val decoded = remember(base64Data) {
         try {
             android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
         } catch (_: Exception) {
             null
         }
     }
-    AndroidView(
-        factory = { ctx ->
-            ImageView(ctx).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-            }
-        },
-        modifier = modifier
-            .fillMaxWidth()
-            .widthIn(min = 120.dp),
-        update = { imageView ->
-            if (decoded == null) {
-                imageView.setImageURI(Uri.EMPTY)
-                return@AndroidView
-            }
-            val bmp = BitmapFactory.decodeByteArray(decoded, 0, decoded.size)
-            imageView.setImageBitmap(bmp)
-        },
-    )
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                ImageView(ctx).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    adjustViewBounds = true
+                }
+            },
+            modifier = modifier
+                .fillMaxWidth()
+                .widthIn(min = 120.dp)
+                .clip(RoundedCornerShape(20.dp)),
+            update = { imageView ->
+                if (decoded == null) {
+                    imageView.setImageURI(Uri.EMPTY)
+                    return@AndroidView
+                }
+                val bmp = BitmapFactory.decodeByteArray(decoded, 0, decoded.size)
+                imageView.setImageBitmap(bmp)
+            },
+        )
+    }
 }

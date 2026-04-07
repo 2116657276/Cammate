@@ -1,9 +1,9 @@
 package com.liveaicapture.mvp.ui.components
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.People
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -16,9 +16,9 @@ enum class AppRootTab(
     val label: String,
     val icon: ImageVector,
 ) {
-    Capture("拍摄", Icons.Outlined.Tune),
-    Community("社区", Icons.Outlined.People),
-    Settings("设置", Icons.Outlined.Settings),
+    Capture("主页", Icons.Outlined.Home),
+    Community("\u793e\u533a", Icons.Outlined.People),
+    Settings("\u6211\u7684", Icons.Outlined.PersonOutline),
 }
 
 @Composable

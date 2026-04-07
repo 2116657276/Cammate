@@ -1,7 +1,23 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { input ->
+            load(input)
+        }
+    }
+}
+
+val defaultServerUrl = (
+    localProperties.getProperty("cammate.server.url")
+        ?: "http://10.0.2.2:8010"
+).trim().ifBlank { "http://10.0.2.2:8010" }
 
 android {
     namespace = "com.liveaicapture.mvp"
@@ -13,6 +29,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("String", "DEFAULT_SERVER_URL", "\"$defaultServerUrl\"")
     }
 
     buildTypes {

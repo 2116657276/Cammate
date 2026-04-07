@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
@@ -15,6 +17,7 @@ import androidx.lifecycle.viewModelScope
 import com.liveaicapture.mvp.camera.FrameEncoder
 import com.liveaicapture.mvp.data.AnalyzeEvent
 import com.liveaicapture.mvp.data.AppSettings
+import com.liveaicapture.mvp.data.AuthUser
 import com.liveaicapture.mvp.data.AuthUiState
 import com.liveaicapture.mvp.data.CameraUiState
 import com.liveaicapture.mvp.data.CaptureMode
@@ -47,6 +50,7 @@ import com.liveaicapture.mvp.network.RetouchApiClient
 import com.liveaicapture.mvp.network.SceneApiClient
 import com.liveaicapture.mvp.network.SceneDetectResult
 import com.liveaicapture.mvp.tts.TtsSpeaker
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -72,6 +76,7 @@ import kotlinx.serialization.json.buildJsonObject
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "CamMate"
+        private const val COMMUNITY_AUTO_COMPOSE_STRENGTH = 0.92f
         private const val UI_STABILITY_PUBLISH_INTERVAL_MS = 320L
         private const val STABLE_SCENE_DETECT_INTERVAL_MS = 900L
         private const val UNSTABLE_SCENE_DETECT_INTERVAL_MS = 1_400L
@@ -185,7 +190,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             bearerToken = session.bearerToken
             syncCommunityAuthHeader()
             try {
-                val user = authApiClient.me(_uiState.value.settings.serverUrl, bearerToken)
+                val user = mergeSessionProfile(
+                    remoteUser = authApiClient.me(_uiState.value.settings.serverUrl, bearerToken),
+                    session = session,
+                )
                 _authUiState.value = AuthUiState(
                     checkingSession = false,
                     authenticated = true,
@@ -213,6 +221,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAuthError() {
         _authUiState.update { it.copy(errorMessage = null) }
+    }
+
+    fun updateProfileNickname(value: String) {
+        val currentUser = _authUiState.value.user ?: return
+        val normalized = value.trim().take(32)
+        if (normalized.isBlank()) return
+        persistProfile(currentUser.copy(nickname = normalized))
+    }
+
+    fun updateProfileBio(value: String) {
+        val currentUser = _authUiState.value.user ?: return
+        persistProfile(currentUser.copy(bio = value.trim().take(80)))
+    }
+
+    fun updateProfileAvatarUri(uri: String?) {
+        val currentUser = _authUiState.value.user ?: return
+        persistProfile(currentUser.copy(avatarUri = uri))
     }
 
     fun login(email: String, password: String) {
@@ -336,6 +361,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun switchAccount() {
+        logout()
+    }
+
     private fun resetFlowAfterLogout() {
         composeJobPolling?.cancel()
         composeJobPolling = null
@@ -366,6 +395,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 moveHintText = "",
             )
+        }
+    }
+
+    private fun mergeSessionProfile(
+        remoteUser: AuthUser,
+        session: com.liveaicapture.mvp.data.StoredSession,
+    ): AuthUser {
+        return remoteUser.copy(
+            nickname = session.userNickname.ifBlank { remoteUser.nickname },
+            bio = session.userBio,
+            avatarUri = session.userAvatarUri,
+        )
+    }
+
+    private fun persistProfile(user: AuthUser) {
+        _authUiState.update { it.copy(user = user, errorMessage = null) }
+        viewModelScope.launch {
+            sessionRepository.updateProfile(user)
         }
     }
 
@@ -1049,12 +1096,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 photoCount = it.photoCount + 1,
                 lastPhotoUri = savedUri,
-                showPostCaptureChoice = !savedUri.isNullOrBlank(),
+                showPostCaptureChoice = false,
                 statusText = "照片已保存",
             )
         }
+        val aspectRatio = savedUri?.let { readPhotoAspectRatio(it) } ?: (3f / 4f)
         _retouchUiState.value = RetouchUiState(
             originalPhotoUri = savedUri,
+            originalPhotoAspectRatio = aspectRatio,
+            previewAspectRatio = aspectRatio,
+            sceneHint = _uiState.value.detectedScene,
+        )
+        _feedbackUiState.value = FeedbackUiState()
+    }
+
+    fun onGalleryPhotoSelected(uri: String?) {
+        if (uri.isNullOrBlank()) return
+        logClientInfo("photo.gallery", "selectedUri=$uri")
+        _uiState.update {
+            it.copy(
+                lastPhotoUri = uri,
+                showPostCaptureChoice = false,
+                statusText = "已连接系统图库",
+            )
+        }
+        val aspectRatio = readPhotoAspectRatio(uri)
+        _retouchUiState.value = RetouchUiState(
+            originalPhotoUri = uri,
+            originalPhotoAspectRatio = aspectRatio,
+            previewAspectRatio = aspectRatio,
             sceneHint = _uiState.value.detectedScene,
         )
         _feedbackUiState.value = FeedbackUiState()
@@ -1083,7 +1153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun applyRetouch() {
         val current = _retouchUiState.value
         val sourceUri = current.originalPhotoUri
-        if (sourceUri.isNullOrBlank()) {
+        if (sourceUri.isNullOrBlank() && current.currentInputBase64.isNullOrBlank()) {
             _retouchUiState.update { it.copy(errorMessage = "未找到原图，请重新拍摄") }
             return
         }
@@ -1103,7 +1173,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             logClientInfo("retouch.apply", "start mode=${current.mode.raw} preset=${current.preset.raw}")
             _retouchUiState.update { it.copy(applying = true, requestId = "", errorMessage = null) }
             try {
-                val imageBase64 = encodePhotoUriToBase64(sourceUri)
+                val imageBase64 = current.currentInputBase64?.takeIf { it.isNotBlank() }
+                    ?: sourceUri?.let { encodePhotoUriToBase64(it) }
+                    ?: throw IllegalStateException("missing retouch source")
                 val customPrompt = if (current.mode == RetouchMode.CUSTOM) current.customPrompt.trim() else null
                 val result = retouchApiClient.retouch(
                     serverUrl = _uiState.value.settings.serverUrl,
@@ -1120,7 +1192,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _retouchUiState.update {
                     it.copy(
                         applying = false,
+                        currentInputBase64 = result.imageBase64,
                         previewBase64 = result.imageBase64,
+                        previewAspectRatio = readBase64AspectRatio(result.imageBase64),
                         provider = result.provider,
                         model = result.model,
                         requestId = result.requestId,
@@ -1151,6 +1225,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _feedbackUiState.value = FeedbackUiState(
             visible = true,
             photoUri = sourceUri,
+            photoBase64 = null,
+            photoAspectRatio = _retouchUiState.value.originalPhotoAspectRatio,
             isRetouched = false,
             scene = _uiState.value.detectedScene,
             tipText = _uiState.value.tipText,
@@ -1161,12 +1237,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun restartRetouchFromOriginal() {
         val current = _retouchUiState.value
         _retouchUiState.value = current.copy(
+            currentInputBase64 = null,
             mode = RetouchMode.TEMPLATE,
             preset = RetouchPreset.BG_CLEANUP,
             customPrompt = "",
             strength = 0.35f,
             applying = false,
             previewBase64 = null,
+            previewAspectRatio = current.originalPhotoAspectRatio,
             provider = "",
             model = "",
             requestId = "",
@@ -1174,35 +1252,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun continueWithRetouchedPhoto() {
+    fun continueRetouchFromCurrentResult() {
+        val current = _retouchUiState.value
+        val preview = current.previewBase64?.takeIf { it.isNotBlank() } ?: return
+        _retouchUiState.value = current.copy(
+            currentInputBase64 = preview,
+            applying = false,
+            requestId = "",
+            errorMessage = null,
+        )
+    }
+
+    fun continueRetouchWithCurrentSettings() {
+        continueRetouchFromCurrentResult()
+        applyRetouch()
+    }
+
+fun continueWithRetouchedPhoto() {
         val retouched = _retouchUiState.value.previewBase64
         _uiState.update { it.copy(showPostCaptureChoice = false) }
         if (retouched.isNullOrBlank()) {
             continueWithOriginalPhoto()
             return
         }
-
-        viewModelScope.launch {
-            val savedUri = try {
-                saveBase64ToGallery(retouched, "CamMate_Retouch")
-            } catch (e: Exception) {
-                logClientError(
-                    scope = "retouch.saveToGallery",
-                    throwable = e,
-                    userHint = "修图结果保存失败，改用原图继续",
-                )
-                null
-            }
-            val finalUri = savedUri ?: _retouchUiState.value.originalPhotoUri
-            _feedbackUiState.value = FeedbackUiState(
-                visible = true,
-                photoUri = finalUri,
-                isRetouched = true,
-                scene = _uiState.value.detectedScene,
-                tipText = _uiState.value.tipText,
-                publishSceneType = _uiState.value.detectedScene.raw,
-            )
-        }
+        _feedbackUiState.value = FeedbackUiState(
+            visible = true,
+            photoUri = _retouchUiState.value.originalPhotoUri,
+            photoBase64 = retouched,
+            photoAspectRatio = _retouchUiState.value.previewAspectRatio,
+            isRetouched = true,
+            scene = _uiState.value.detectedScene,
+            tipText = _uiState.value.tipText,
+            publishSceneType = _uiState.value.detectedScene.raw,
+        )
     }
 
     fun updateFeedbackRating(value: Int) {
@@ -1243,7 +1325,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _feedbackUiState.update { it.copy(errorMessage = "请先登录") }
             return
         }
-        if (current.publishToCommunity && current.photoUri.isNullOrBlank()) {
+        if (current.publishToCommunity && current.photoUri.isNullOrBlank() && current.photoBase64.isNullOrBlank()) {
             _feedbackUiState.update { it.copy(errorMessage = "未找到可发布图片，请重新拍摄") }
             return
         }
@@ -1277,8 +1359,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (feedbackId <= 0) throw IllegalStateException("反馈提交失败")
                 var publishedPostId: Int? = null
                 if (current.publishToCommunity) {
-                    val photoUri = current.photoUri ?: throw IllegalStateException("未找到可发布图片")
-                    val imageBase64 = encodePhotoUriToBase64(photoUri)
+                    val imageBase64 = current.photoBase64?.takeIf { it.isNotBlank() }
+                        ?: current.photoUri?.let { encodePhotoUriToBase64(it) }
+                        ?: throw IllegalStateException("未找到可发布图片")
                     val post = communityApiClient.publishPost(
                         serverUrl = _uiState.value.settings.serverUrl,
                         bearerToken = bearerToken,
@@ -1322,12 +1405,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(statusText = "反馈已提交，感谢支持", showPostCaptureChoice = false) }
     }
 
+    fun dismissFeedbackScreen() {
+        _feedbackUiState.update {
+            it.copy(
+                visible = false,
+                submitting = false,
+                submitted = false,
+                errorMessage = null,
+            )
+        }
+    }
+
     fun clearCommunityError() {
         _communityUiState.update { it.copy(errorMessage = null) }
     }
 
     fun updateDirectPublishImageUri(uri: String?) {
-        _communityUiState.update { it.copy(publishImageUri = uri, errorMessage = null) }
+        _communityUiState.update {
+            it.copy(
+                publishImageUri = uri,
+                publishSuccessPostId = null,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun prepareDirectPublish(imageUri: String?) {
+        _communityUiState.update {
+            it.copy(
+                publishingDirect = false,
+                publishImageUri = imageUri,
+                publishPlaceTag = "",
+                publishSceneType = "",
+                publishCaption = "",
+                publishReviewText = "",
+                publishRating = null,
+                publishPostType = "normal",
+                publishRelayParentPostId = null,
+                publishStyleTemplatePostId = null,
+                publishSuccessPostId = null,
+                errorMessage = null,
+            )
+        }
     }
 
     fun useLatestPhotoForDirectPublish() {
@@ -1338,7 +1457,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _communityUiState.update { it.copy(errorMessage = "暂无最近拍摄照片，请先拍照或从相册选择") }
             return
         }
-        _communityUiState.update { it.copy(publishImageUri = latest, errorMessage = null) }
+        _communityUiState.update {
+            it.copy(
+                publishImageUri = latest,
+                errorMessage = null,
+            )
+        }
     }
 
     fun updateDirectPublishPlaceTag(value: String) {
@@ -1356,6 +1480,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateDirectPublishReviewText(value: String) {
         _communityUiState.update { it.copy(publishReviewText = value.take(280), errorMessage = null) }
+    }
+
+    fun consumePublishSuccess() {
+        _communityUiState.update { it.copy(publishSuccessPostId = null) }
     }
 
     fun updateDirectPublishRating(value: Int?) {
@@ -1393,6 +1521,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun directPublishSceneLabel(raw: String): String {
+        return when (raw.trim().lowercase()) {
+            "portrait" -> "人像"
+            "landscape" -> "风景"
+            "food" -> "美食"
+            "night" -> "夜景"
+            "pet" -> "宠物"
+            "flower" -> "花草"
+            "general" -> "通用"
+            else -> ""
+        }
+    }
+
     fun publishDirectPost() {
         val state = _communityUiState.value
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
@@ -1413,12 +1554,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _communityUiState.update { it.copy(publishingDirect = true, errorMessage = null) }
             try {
                 val imageBase64 = encodePhotoUriToBase64(state.publishImageUri)
+                val publishPlaceTag = state.publishPlaceTag.trim().ifBlank {
+                    directPublishSceneLabel(state.publishSceneType)
+                }
                 val post = if (state.publishPostType == "relay" && (state.publishRelayParentPostId ?: 0) > 0) {
                     communityApiClient.publishRelayPost(
                         serverUrl = _uiState.value.settings.serverUrl,
                         bearerToken = bearerToken,
                         imageBase64 = imageBase64,
-                        placeTag = state.publishPlaceTag.trim(),
+                        placeTag = publishPlaceTag,
                         sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
                         caption = state.publishCaption.trim(),
                         reviewText = state.publishReviewText.trim(),
@@ -1431,7 +1575,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         serverUrl = _uiState.value.settings.serverUrl,
                         bearerToken = bearerToken,
                         imageBase64 = imageBase64,
-                        placeTag = state.publishPlaceTag.trim(),
+                        placeTag = publishPlaceTag,
                         sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
                         caption = state.publishCaption.trim(),
                         reviewText = state.publishReviewText.trim(),
@@ -1453,6 +1597,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         publishPostType = "normal",
                         publishRelayParentPostId = null,
                         publishStyleTemplatePostId = null,
+                        publishSuccessPostId = post.id.takeIf { id -> id > 0 },
                         referencePostId = post.id.takeIf { id -> id > 0 } ?: it.referencePostId,
                         errorMessage = null,
                     )
@@ -1795,6 +1940,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deletePost(postId: Int) {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
+            _communityUiState.update { it.copy(errorMessage = "璇峰厛鐧诲綍") }
+            return
+        }
+        if (_communityUiState.value.deletingPostIds.contains(postId)) return
+
+        _communityUiState.update {
+            it.copy(
+                deletingPostIds = it.deletingPostIds + postId,
+                errorMessage = null,
+            )
+        }
+        viewModelScope.launch {
+            try {
+                communityApiClient.deletePost(
+                    serverUrl = _uiState.value.settings.serverUrl,
+                    bearerToken = bearerToken,
+                    postId = postId,
+                )
+                _communityUiState.update { state ->
+                    pruneDeletedPost(state, postId).copy(
+                        deletingPostIds = state.deletingPostIds - postId,
+                        errorMessage = null,
+                    )
+                }
+                refreshCommunityFeed(reset = true)
+            } catch (e: Exception) {
+                logClientError(
+                    scope = "community.posts.delete",
+                    throwable = e,
+                    userHint = "帖子删除失败",
+                )
+                _communityUiState.update {
+                    it.copy(
+                        deletingPostIds = it.deletingPostIds - postId,
+                        errorMessage = "帖子删除失败，请稍后重试",
+                    )
+                }
+            }
+        }
+    }
+
     fun requestRemakeGuide(templatePostId: Int) {
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _communityUiState.update { it.copy(errorMessage = "请先登录") }
@@ -2012,7 +2200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bearerToken = bearerToken,
                     referencePostId = referenceId,
                     personImageBase64 = personBase64,
-                    strength = state.composeStrength,
+                    strength = COMMUNITY_AUTO_COMPOSE_STRENGTH,
                 )
                 _communityUiState.update { current ->
                     current.copy(
@@ -2271,7 +2459,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     referencePostId = referenceId,
                     personAImageBase64 = personABase64,
                     personBImageBase64 = personBBase64,
-                    strength = state.composeStrength,
+                    strength = COMMUNITY_AUTO_COMPOSE_STRENGTH,
                 )
                 _communityUiState.update { current ->
                     current.copy(
@@ -2477,7 +2665,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 when (status) {
-                    "queued", "running" -> delay(1200)
+                    "queued", "running" -> delay(800)
                     "success" -> {
                         _communityUiState.update { state ->
                             val image = job.composedImageBase64
@@ -2517,7 +2705,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         return@launch
                     }
-                    else -> delay(1200)
+                    else -> delay(800)
                 }
             }
         }
@@ -2578,7 +2766,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 when (status) {
-                    "queued", "running" -> delay(1200)
+                    "queued", "running" -> delay(800)
                     "success" -> {
                         _communityUiState.update { state ->
                             val image = job.composedImageBase64
@@ -2618,7 +2806,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         return@launch
                     }
-                    else -> delay(1200)
+                    else -> delay(800)
                 }
             }
         }
@@ -2654,6 +2842,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (originalBytes.isEmpty()) {
             throw IllegalStateException("原图内容为空")
         }
+        val normalized = decodeNormalizedBitmap(originalBytes, maxSide = 1600)
+        val normalizedOutput = ByteArrayOutputStream()
+        normalized.compress(Bitmap.CompressFormat.JPEG, 88, normalizedOutput)
+        normalized.recycle()
+        val normalizedBytes = normalizedOutput.toByteArray()
+        if (normalizedBytes.isEmpty()) {
+            throw IllegalStateException("鍙戝竷鍥剧墖鍘嬬缉澶辫触")
+        }
+        return Base64.encodeToString(normalizedBytes, Base64.NO_WRAP)
         val source = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size)
             ?: throw IllegalStateException("无法解析所选图片")
         val maxSide = 1600
@@ -2680,6 +2877,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             throw IllegalStateException("发布图片压缩失败")
         }
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    private fun readPhotoAspectRatio(photoUri: String): Float {
+        return runCatching {
+            val app = getApplication<Application>()
+            val uri = Uri.parse(photoUri)
+            val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return@runCatching 3f / 4f
+            readImageAspectRatio(bytes)
+        }.getOrElse { 3f / 4f }
+    }
+
+    private fun readBase64AspectRatio(base64Data: String): Float {
+        return runCatching {
+            val bytes = Base64.decode(base64Data, Base64.DEFAULT)
+            readImageAspectRatio(bytes)
+        }.getOrElse { _retouchUiState.value.previewAspectRatio }
+    }
+
+    private fun readImageAspectRatio(imageBytes: ByteArray): Float {
+        if (imageBytes.isEmpty()) return 3f / 4f
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, bounds)
+        val width = bounds.outWidth.coerceAtLeast(1)
+        val height = bounds.outHeight.coerceAtLeast(1)
+        val orientation = readExifOrientation(imageBytes)
+        val swap = orientation in setOf(
+            ExifInterface.ORIENTATION_ROTATE_90,
+            ExifInterface.ORIENTATION_ROTATE_270,
+            ExifInterface.ORIENTATION_TRANSPOSE,
+            ExifInterface.ORIENTATION_TRANSVERSE,
+        )
+        val finalWidth = if (swap) height else width
+        val finalHeight = if (swap) width else height
+        return finalWidth.toFloat() / finalHeight.toFloat()
+    }
+
+    private fun decodeNormalizedBitmap(imageBytes: ByteArray, maxSide: Int): Bitmap {
+        val source = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            ?: throw IllegalStateException("failed to decode selected image")
+        val oriented = applyExifOrientation(source, readExifOrientation(imageBytes))
+        val longestSide = maxOf(oriented.width, oriented.height).coerceAtLeast(1)
+        if (longestSide <= maxSide) {
+            return oriented
+        }
+        val scale = maxSide.toFloat() / longestSide.toFloat()
+        val scaled = Bitmap.createScaledBitmap(
+            oriented,
+            (oriented.width * scale).toInt().coerceAtLeast(1),
+            (oriented.height * scale).toInt().coerceAtLeast(1),
+            true,
+        )
+        if (scaled !== oriented) {
+            oriented.recycle()
+        }
+        return scaled
+    }
+
+    private fun readExifOrientation(imageBytes: ByteArray): Int {
+        return runCatching {
+            ExifInterface(ByteArrayInputStream(imageBytes)).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL,
+            )
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+    }
+
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> {
+                matrix.setRotate(180f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.setRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.setRotate(-90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(-90f)
+            else -> return bitmap
+        }
+        val transformed = Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true,
+        )
+        if (transformed !== bitmap) {
+            bitmap.recycle()
+        }
+        return transformed
     }
 
     private fun saveBase64ToGallery(base64Data: String, prefix: String): String? {
@@ -2781,6 +3079,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 authHeader = if (bearerToken.isNotBlank()) "Bearer $bearerToken" else "",
             )
         }
+    }
+
+    private fun pruneDeletedPost(state: CommunityUiState, postId: Int): CommunityUiState {
+        return state.copy(
+            feed = state.feed.filterNot { it.id == postId },
+            recommendations = state.recommendations.filterNot { it.post.id == postId },
+            commentsByPost = state.commentsByPost - postId,
+            commentDraftByPost = state.commentDraftByPost - postId,
+            referencePostId = state.referencePostId.takeUnless { it == postId },
+            publishRelayParentPostId = state.publishRelayParentPostId.takeUnless { it == postId },
+            publishStyleTemplatePostId = state.publishStyleTemplatePostId.takeUnless { it == postId },
+            publishSuccessPostId = state.publishSuccessPostId.takeUnless { it == postId },
+            remakeGuide = state.remakeGuide.takeUnless { it?.templatePost?.id == postId },
+            remakeAnalysis = state.remakeAnalysis.takeUnless { it?.templatePostId == postId },
+        )
     }
 
     private fun CommunityPostDto.toCommunityPost(serverUrl: String): CommunityPostItem {

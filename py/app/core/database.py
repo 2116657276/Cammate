@@ -66,6 +66,8 @@ def ensure_db() -> None:
                 user_id INTEGER NOT NULL,
                 feedback_id INTEGER,
                 image_path TEXT NOT NULL,
+                image_blob BLOB,
+                image_mime_type TEXT NOT NULL DEFAULT '',
                 scene_type TEXT NOT NULL,
                 place_tag TEXT NOT NULL,
                 rating INTEGER NOT NULL,
@@ -316,6 +318,10 @@ def _ensure_community_posts_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE community_posts ADD COLUMN like_count INTEGER NOT NULL DEFAULT 0")
     if "comment_count" not in cols:
         conn.execute("ALTER TABLE community_posts ADD COLUMN comment_count INTEGER NOT NULL DEFAULT 0")
+    if "image_blob" not in cols:
+        conn.execute("ALTER TABLE community_posts ADD COLUMN image_blob BLOB")
+    if "image_mime_type" not in cols:
+        conn.execute("ALTER TABLE community_posts ADD COLUMN image_mime_type TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_community_posts_feedback_nullable(conn: sqlite3.Connection) -> None:
@@ -345,6 +351,8 @@ def _ensure_community_posts_feedback_nullable(conn: sqlite3.Connection) -> None:
                 user_id INTEGER NOT NULL,
                 feedback_id INTEGER,
                 image_path TEXT NOT NULL,
+                image_blob BLOB,
+                image_mime_type TEXT NOT NULL DEFAULT '',
                 scene_type TEXT NOT NULL,
                 place_tag TEXT NOT NULL,
                 rating INTEGER NOT NULL,
@@ -366,13 +374,13 @@ def _ensure_community_posts_feedback_nullable(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO community_posts_new(
-                id, user_id, feedback_id, image_path, scene_type, place_tag,
+                id, user_id, feedback_id, image_path, image_blob, image_mime_type, scene_type, place_tag,
                 rating, review_text, caption, post_type, source_type,
                 relay_parent_post_id, style_template_post_id,
                 like_count, comment_count, created_at, moderation_status
             )
             SELECT
-                id, user_id, feedback_id, image_path, scene_type, place_tag,
+                id, user_id, feedback_id, image_path, image_blob, image_mime_type, scene_type, place_tag,
                 rating, review_text, caption, post_type, source_type,
                 relay_parent_post_id, style_template_post_id,
                 like_count, comment_count, created_at, moderation_status

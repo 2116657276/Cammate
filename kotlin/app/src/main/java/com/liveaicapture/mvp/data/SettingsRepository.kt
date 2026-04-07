@@ -8,27 +8,50 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.liveaicapture.mvp.BuildConfig
+import java.net.URI
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "live_ai_capture_settings")
 
 class SettingsRepository(private val context: Context) {
-    private val defaultServerUrl = "http://10.0.2.2:8010"
+    private val defaultServerUrl = BuildConfig.DEFAULT_SERVER_URL.trim().ifBlank { "http://10.0.2.2:8010" }
+    private val legacyDefaultServerUrls = setOf(
+        "http://10.0.2.2:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://10.0.2.2:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://10.0.2.2:8010",
+        "http://127.0.0.1:8010",
+        "http://localhost:8010",
+    )
+    private val commonDevPorts = setOf(8000, 8010, 8080)
+
+    private fun parseServerUrl(raw: String): URI? = runCatching {
+        URI(raw.trim().trimEnd('/'))
+    }.getOrNull()
+
+    private fun shouldUseCurrentDefault(raw: String): Boolean {
+        val value = raw.trim().trimEnd('/')
+        if (value in legacyDefaultServerUrls) return true
+
+        val current = parseServerUrl(defaultServerUrl) ?: return false
+        val parsed = parseServerUrl(value) ?: return false
+        if (!current.scheme.equals(parsed.scheme, ignoreCase = true)) return false
+        if (!current.host.equals(parsed.host, ignoreCase = true)) return false
+        if ((current.path ?: "").trimEnd('/') != (parsed.path ?: "").trimEnd('/')) return false
+        if (parsed.port !in commonDevPorts) return false
+        return parsed.port != current.port
+    }
 
     private fun normalizeServerUrl(raw: String?): String {
         val value = raw?.trim().orEmpty()
         if (value.isBlank()) return defaultServerUrl
-        if (
-            value == "http://10.0.2.2:8000" ||
-            value == "http://127.0.0.1:8000" ||
-            value == "http://localhost:8000"
-        ) {
-            return when {
-                value.contains("10.0.2.2") -> "http://10.0.2.2:8010"
-                value.contains("127.0.0.1") -> "http://127.0.0.1:8010"
-                else -> "http://localhost:8010"
-            }
+        if (shouldUseCurrentDefault(value) && value != defaultServerUrl) {
+            return defaultServerUrl
         }
         return value
     }
@@ -54,7 +77,14 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun updateServerUrl(value: String) {
-        context.dataStore.edit { it[Keys.serverUrl] = normalizeServerUrl(value) }
+        val normalized = normalizeServerUrl(value)
+        context.dataStore.edit {
+            if (normalized == defaultServerUrl) {
+                it[Keys.serverUrl] = ""
+            } else {
+                it[Keys.serverUrl] = normalized
+            }
+        }
     }
 
     suspend fun updateIntervalMs(value: Long) {
@@ -78,8 +108,13 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun updateAll(settings: AppSettings) {
+        val normalizedServerUrl = normalizeServerUrl(settings.serverUrl)
         context.dataStore.edit { pref ->
-            pref[Keys.serverUrl] = normalizeServerUrl(settings.serverUrl)
+            if (normalizedServerUrl == defaultServerUrl) {
+                pref[Keys.serverUrl] = ""
+            } else {
+                pref[Keys.serverUrl] = normalizedServerUrl
+            }
             pref[Keys.intervalMs] = settings.intervalMs.coerceIn(300L, 5000L)
             pref[Keys.voiceEnabled] = settings.voiceEnabled
             pref[Keys.debugEnabled] = settings.debugEnabled
@@ -90,7 +125,7 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun resetDefaults() {
         context.dataStore.edit { pref ->
-            pref[Keys.serverUrl] = defaultServerUrl
+            pref[Keys.serverUrl] = ""
             pref[Keys.intervalMs] = 1000L
             pref[Keys.voiceEnabled] = true
             pref[Keys.debugEnabled] = false

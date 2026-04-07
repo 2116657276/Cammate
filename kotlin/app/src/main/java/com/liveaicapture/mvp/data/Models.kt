@@ -2,6 +2,7 @@ package com.liveaicapture.mvp.data
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import com.liveaicapture.mvp.BuildConfig
 
 enum class GuideProvider(val raw: String, val label: String) {
     LOCAL("local", "本地引导"),
@@ -31,11 +32,12 @@ enum class SceneType(val raw: String, val label: String) {
     GENERAL("general", "通用"),
     LANDSCAPE("landscape", "风景"),
     FOOD("food", "美食"),
-    NIGHT("night", "夜景");
+    NIGHT("night", "夜景"),
+    PET("pet", "宠物"),
+    FLOWER("flower", "花草");
 
     companion object {
         fun fromRaw(raw: String): SceneType {
-            if (raw == "landscape") return GENERAL
             return entries.firstOrNull { it.raw == raw } ?: GENERAL
         }
     }
@@ -65,7 +67,7 @@ enum class RetouchMode(val raw: String, val label: String) {
 }
 
 data class AppSettings(
-    val serverUrl: String = "http://10.0.2.2:8010",
+    val serverUrl: String = BuildConfig.DEFAULT_SERVER_URL,
     val intervalMs: Long = 1000L,
     val voiceEnabled: Boolean = true,
     val debugEnabled: Boolean = false,
@@ -114,6 +116,8 @@ data class AuthUser(
     val id: Int,
     val email: String,
     val nickname: String,
+    val bio: String = "",
+    val avatarUri: String? = null,
 )
 
 data class AuthUiState(
@@ -129,6 +133,8 @@ data class StoredSession(
     val userId: Int = 0,
     val userEmail: String = "",
     val userNickname: String = "",
+    val userBio: String = "",
+    val userAvatarUri: String? = null,
     val expiresAtEpochSec: Long = 0L,
 ) {
     val isAvailable: Boolean
@@ -137,12 +143,15 @@ data class StoredSession(
 
 data class RetouchUiState(
     val originalPhotoUri: String? = null,
+    val currentInputBase64: String? = null,
     val preset: RetouchPreset = RetouchPreset.BG_CLEANUP,
     val mode: RetouchMode = RetouchMode.TEMPLATE,
     val customPrompt: String = "",
     val strength: Float = 0.35f,
     val applying: Boolean = false,
     val previewBase64: String? = null,
+    val originalPhotoAspectRatio: Float = 3f / 4f,
+    val previewAspectRatio: Float = 3f / 4f,
     val provider: String = "",
     val model: String = "",
     val requestId: String = "",
@@ -153,6 +162,8 @@ data class RetouchUiState(
 data class FeedbackUiState(
     val visible: Boolean = false,
     val photoUri: String? = null,
+    val photoBase64: String? = null,
+    val photoAspectRatio: Float = 3f / 4f,
     val isRetouched: Boolean = false,
     val scene: SceneType = SceneType.GENERAL,
     val tipText: String = "",
@@ -240,6 +251,7 @@ data class CommunityUiState(
     val composing: Boolean = false,
     val cocreating: Boolean = false,
     val publishingDirect: Boolean = false,
+    val deletingPostIds: Set<Int> = emptySet(),
     val remakeLoading: Boolean = false,
     val remakeAnalyzing: Boolean = false,
     val feedHasMore: Boolean = true,
@@ -260,6 +272,7 @@ data class CommunityUiState(
     val publishPostType: String = "normal",
     val publishRelayParentPostId: Int? = null,
     val publishStyleTemplatePostId: Int? = null,
+    val publishSuccessPostId: Int? = null,
     val referencePostId: Int? = null,
     val personImageUri: String? = null,
     val cocreatePersonAUri: String? = null,

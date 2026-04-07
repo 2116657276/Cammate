@@ -121,7 +121,11 @@ class AuthApiClient(
         val email = obj["email"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val nickname = obj["nickname"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (id <= 0 || email.isBlank()) throw IOException("用户信息不完整")
-        return AuthUser(id = id, email = email, nickname = nickname.ifBlank { email.substringBefore("@") })
+        return AuthUser(
+            id = id,
+            email = email,
+            nickname = nickname.ifBlank { email.substringBefore("@") },
+        )
     }
 }
 

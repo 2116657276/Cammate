@@ -19,6 +19,8 @@ class SessionRepository(private val context: Context) {
         val userId = intPreferencesKey("user_id")
         val userEmail = stringPreferencesKey("user_email")
         val userNickname = stringPreferencesKey("user_nickname")
+        val userBio = stringPreferencesKey("user_bio")
+        val userAvatarUri = stringPreferencesKey("user_avatar_uri")
         val expiresAtEpochSec = longPreferencesKey("expires_at_epoch_sec")
     }
 
@@ -29,6 +31,8 @@ class SessionRepository(private val context: Context) {
             userId = pref[Keys.userId] ?: 0,
             userEmail = pref[Keys.userEmail] ?: "",
             userNickname = pref[Keys.userNickname] ?: "",
+            userBio = pref[Keys.userBio] ?: "",
+            userAvatarUri = pref[Keys.userAvatarUri]?.takeIf { it.isNotBlank() },
             expiresAtEpochSec = pref[Keys.expiresAtEpochSec] ?: 0L,
         )
     }
@@ -40,7 +44,17 @@ class SessionRepository(private val context: Context) {
             it[Keys.userId] = user.id
             it[Keys.userEmail] = user.email
             it[Keys.userNickname] = user.nickname
+            it[Keys.userBio] = user.bio
+            it[Keys.userAvatarUri] = user.avatarUri.orEmpty()
             it[Keys.expiresAtEpochSec] = expiresAt
+        }
+    }
+
+    suspend fun updateProfile(user: AuthUser) {
+        context.sessionStore.edit {
+            it[Keys.userNickname] = user.nickname
+            it[Keys.userBio] = user.bio
+            it[Keys.userAvatarUri] = user.avatarUri.orEmpty()
         }
     }
 
@@ -50,6 +64,8 @@ class SessionRepository(private val context: Context) {
             it.remove(Keys.userId)
             it.remove(Keys.userEmail)
             it.remove(Keys.userNickname)
+            it.remove(Keys.userBio)
+            it.remove(Keys.userAvatarUri)
             it.remove(Keys.expiresAtEpochSec)
         }
     }

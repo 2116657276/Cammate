@@ -56,8 +56,7 @@ fun RegisterScreen(
     }
 
     CamMatePage(
-        title = "创建 CamMate 账号",
-        subtitle = "注册后即可使用完整拍摄流程",
+        title = "注册",
         onBack = onBackToLogin,
     ) {
         item {
@@ -70,7 +69,7 @@ fun RegisterScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("昵称（可选）") },
+                    label = { Text("昵称") },
                 )
                 OutlinedTextField(
                     value = email,
@@ -90,7 +89,7 @@ fun RegisterScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("密码（至少 6 位）") },
+                    label = { Text("密码") },
                 )
                 OutlinedTextField(
                     value = confirmPassword,
@@ -104,16 +103,16 @@ fun RegisterScreen(
                 )
 
                 if (!passwordMatched && confirmPassword.isNotBlank()) {
-                    Text("两次输入的密码不一致", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                    Text("两次密码不一致", color = Color(0xFFB42318))
                 }
                 if (email.isNotBlank() && !emailValid) {
-                    Text("邮箱格式不正确", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                    Text("邮箱格式不正确", color = Color(0xFFB42318))
                 }
                 if (nicknameTooLong) {
-                    Text("昵称最多 32 个字符", color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                    Text("昵称过长", color = Color(0xFFB42318))
                 }
                 authState.errorMessage?.let {
-                    Text(it, color = Color(0xFFB42318), style = MaterialTheme.typography.bodyLarge)
+                    Text(it, color = Color(0xFFB42318))
                 }
 
                 Button(
@@ -121,11 +120,11 @@ fun RegisterScreen(
                     enabled = canSubmit,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (authState.loading) "注册中..." else "注册并登录")
+                    Text(if (authState.loading) "注册中..." else "注册")
                 }
 
                 TextButton(onClick = onBackToLogin, modifier = Modifier.fillMaxWidth()) {
-                    Text("已有账号，返回登录")
+                    Text("返回登录")
                 }
             }
         }

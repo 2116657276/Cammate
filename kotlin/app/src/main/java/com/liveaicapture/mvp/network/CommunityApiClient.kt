@@ -316,6 +316,31 @@ class CommunityApiClient(
         }
     }
 
+    suspend fun deletePost(
+        serverUrl: String,
+        bearerToken: String,
+        postId: Int,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val requestId = newRequestId("community_delete_post")
+        val request = Request.Builder()
+            .url("${serverUrl.trimEnd('/')}/community/posts/$postId")
+            .header("Authorization", "Bearer $bearerToken")
+            .header("x-request-id", requestId)
+            .delete()
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            val responseRequestId = response.header("x-request-id").orEmpty().ifBlank { requestId }
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException(parseHttpError(json, raw, response.code, responseRequestId))
+            }
+            val obj = json.parseToJsonElement(raw).jsonObject
+            val okRaw = obj["ok"]?.jsonPrimitive?.contentOrNull
+                ?: obj["ok"]?.jsonPrimitive?.toString().orEmpty()
+            okRaw == "true" || okRaw == "1"
+        }
+    }
+
     suspend fun fetchRemakeGuide(
         serverUrl: String,
         bearerToken: String,

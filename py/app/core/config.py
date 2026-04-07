@@ -129,6 +129,7 @@ class Settings:
     community_creative_retry_max_delay_sec: int
     community_creative_retry_jitter_ratio: float
     community_creative_result_ttl_sec: int
+    community_creative_provider_timeout_sec: float
     creative_queue_backend: str
     creative_redis_url: str
     creative_redis_ready_key: str
@@ -193,6 +194,7 @@ SETTINGS = Settings(
     community_creative_retry_max_delay_sec=max(5, min(_env_int("COMMUNITY_CREATIVE_RETRY_MAX_DELAY_SEC", 120), 1800)),
     community_creative_retry_jitter_ratio=max(0.0, min(_env_float("COMMUNITY_CREATIVE_RETRY_JITTER_RATIO", 0.35), 1.0)),
     community_creative_result_ttl_sec=max(3600, min(_env_int("COMMUNITY_CREATIVE_RESULT_TTL_SEC", 604800), 7776000)),
+    community_creative_provider_timeout_sec=max(15.0, min(_env_float("COMMUNITY_CREATIVE_PROVIDER_TIMEOUT_SEC", 75.0), 180.0)),
     creative_queue_backend=_env_str("CREATIVE_QUEUE_BACKEND", "redis").strip().lower(),
     creative_redis_url=_env_str("CREATIVE_REDIS_URL", "redis://127.0.0.1:6379/0"),
     creative_redis_ready_key=_env_str("CREATIVE_REDIS_READY_KEY", "cammate:creative:ready"),

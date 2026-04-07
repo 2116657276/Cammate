@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import math
+import os
 import queue
 import random
 import time
@@ -13,8 +14,10 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
+import cv2
+import numpy as np
 from fastapi import HTTPException
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat
 
 from app.core.config import PROJECT_ROOT
 from app.core.config import SETTINGS
@@ -49,19 +52,20 @@ from app.services.creative_queue import get_redis_creative_queue
 from app.services.creative_storage import get_creative_object_storage
 from app.services.community_seed import seed_demo_content
 from app.vision.remake_analyzer import get_pose_remake_analyzer
+from app.vision.subject_fusion import HybridSceneDetector
 from providers.image_edit_provider import DoubaoImageEditProvider
 
-_VALID_SCENE_TYPES = {"portrait", "general", "landscape", "food", "night"}
+_VALID_SCENE_TYPES = {"portrait", "general", "landscape", "food", "night", "pet", "flower"}
 _VALID_POST_TYPES = {"normal", "relay"}
 _SEED_LOCK = Lock()
 _JOB_LOCK = Lock()
 _JOB_QUEUE: queue.Queue[int] = queue.Queue()
 _JOB_WORKERS_STARTED = False
 _JOB_WORKER_THREADS: list[Thread] = []
-_CREATIVE_PROVIDER_TIMEOUT_SEC = 12.0
+_CREATIVE_PROVIDER_TIMEOUT_SEC = float(SETTINGS.community_creative_provider_timeout_sec)
 _CREATIVE_HEARTBEAT_SEC = 2.0
-_CREATIVE_JOB_LEASE_SEC = max(18, int(_CREATIVE_PROVIDER_TIMEOUT_SEC) + 8)
-_CREATIVE_JOB_HARD_TIMEOUT_SEC = max(20, int(_CREATIVE_PROVIDER_TIMEOUT_SEC) + 10)
+_CREATIVE_JOB_LEASE_SEC = max(18, math.ceil(_CREATIVE_PROVIDER_TIMEOUT_SEC) + 8)
+_CREATIVE_JOB_HARD_TIMEOUT_SEC = max(20, math.ceil(_CREATIVE_PROVIDER_TIMEOUT_SEC) + 10)
 _CREATIVE_RECOVERY_INTERVAL_SEC = 10
 _CREATIVE_FAILED_RECENT_WINDOW_SEC = 1800
 _CREATIVE_EVENT_RECENT_WINDOW_SEC = 3600
@@ -72,10 +76,12 @@ _CREATIVE_RETRY_JITTER_RATIO = max(0.0, float(SETTINGS.community_creative_retry_
 _CREATIVE_RESULT_TTL_SEC = max(3600, int(SETTINGS.community_creative_result_ttl_sec))
 _CREATIVE_STALE_HEARTBEAT_SEC = max(_CREATIVE_JOB_LEASE_SEC * 2, 30)
 _CREATIVE_DEFAULT_PRIORITY = 100
+_AUTO_COMPOSE_STRENGTH = 0.92
 logger = logging.getLogger("app.community")
 _REDIS_QUEUE = get_redis_creative_queue()
 _OBJECT_STORAGE = get_creative_object_storage()
 _REMAKE_ANALYZER = get_pose_remake_analyzer()
+_SUBJECT_FUSION_DETECTOR = HybridSceneDetector()
 
 
 class _CreativeJobCanceledError(Exception):
@@ -88,15 +94,25 @@ class _CreativeJobCanceledError(Exception):
 
 
 def bootstrap_creative_runtime() -> None:
-    """Initialize creative runtime; worker startup is opt-in for API process."""
-    if SETTINGS.creative_embedded_worker:
+    """Initialize creative runtime; start embedded workers for local/demo runs."""
+    if _should_start_embedded_worker():
         _ensure_job_worker_started()
+
+
+def _should_start_embedded_worker() -> bool:
+    if SETTINGS.creative_embedded_worker:
+        return True
+    if SETTINGS.creative_queue_backend != "redis":
+        return False
+    app_env = os.getenv("APP_ENV", "development").strip().lower()
+    return app_env not in {"prod", "production"}
 
 
 def publish_post(user_id: int, req: CommunityPublishRequest) -> CommunityPostView:
     place_tag = _normalize_place_tag(req.place_tag)
     scene_type = _normalize_scene_type(req.scene_type)
     image_bytes = _prepare_jpeg_bytes(req.image_base64, max_side=SETTINGS.community_upload_max_side)
+    image_mime_type = "image/jpeg"
 
     conn = open_db()
     try:
@@ -118,16 +134,18 @@ def publish_post(user_id: int, req: CommunityPublishRequest) -> CommunityPostVie
         cur = conn.execute(
             """
             INSERT INTO community_posts(
-                user_id, feedback_id, image_path, scene_type, place_tag,
+                user_id, feedback_id, image_path, image_blob, image_mime_type, scene_type, place_tag,
                 rating, review_text, caption, post_type, source_type,
                 relay_parent_post_id, style_template_post_id,
                 like_count, comment_count, created_at, moderation_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'normal', 'feedback_flow', NULL, NULL, 0, 0, ?, 'published')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', 'feedback_flow', NULL, NULL, 0, 0, ?, 'published')
             """,
             (
                 user_id,
                 req.feedback_id,
                 str(upload_path),
+                image_bytes,
+                image_mime_type,
                 scene_type,
                 place_tag,
                 int(feedback["rating"]),
@@ -162,6 +180,7 @@ def publish_direct_post(user_id: int, req: CommunityDirectPublishRequest) -> Com
     _ensure_safe_text(review_text)
 
     image_bytes = _prepare_jpeg_bytes(req.image_base64, max_side=SETTINGS.community_upload_max_side)
+    image_mime_type = "image/jpeg"
 
     conn = open_db()
     try:
@@ -188,16 +207,18 @@ def publish_direct_post(user_id: int, req: CommunityDirectPublishRequest) -> Com
         cur = conn.execute(
             """
             INSERT INTO community_posts(
-                user_id, feedback_id, image_path, scene_type, place_tag,
+                user_id, feedback_id, image_path, image_blob, image_mime_type, scene_type, place_tag,
                 rating, review_text, caption, post_type, source_type,
                 relay_parent_post_id, style_template_post_id,
                 like_count, comment_count, created_at, moderation_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct', ?, ?, 0, 0, ?, 'published')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct', ?, ?, 0, 0, ?, 'published')
             """,
             (
                 user_id,
                 feedback_id,
                 str(upload_path),
+                image_bytes,
+                image_mime_type,
                 scene_type,
                 place_tag,
                 rating,
@@ -476,6 +497,46 @@ def unlike_post(user_id: int, post_id: int) -> CommunityLikeResponse:
         conn.close()
 
 
+def delete_post(user_id: int, post_id: int) -> CommunityDeleteResponse:
+    raw_image_path = ""
+    conn = open_db()
+    try:
+        row = conn.execute(
+            "SELECT id, user_id, image_path FROM community_posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="community post not found")
+        if int(row["user_id"]) != user_id:
+            raise HTTPException(status_code=403, detail="post does not belong to current user")
+
+        raw_image_path = str(row["image_path"] or "").strip()
+        job_rows = conn.execute(
+            "SELECT * FROM community_creative_jobs WHERE reference_post_id = ?",
+            (post_id,),
+        ).fetchall()
+        for job_row in job_rows:
+            job_id = int(job_row["id"])
+            _delete_local_creative_path(str(job_row["result_image_path"] or ""))
+            _delete_local_creative_path(str(job_row["compare_input_path"] or ""))
+            _delete_job_artifacts(job_id=job_id, row=job_row)
+
+        conn.execute("DELETE FROM community_post_likes WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM community_post_comments WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM community_post_signals WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM community_post_reports WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM community_creative_jobs WHERE reference_post_id = ?", (post_id,))
+        conn.execute("UPDATE community_posts SET relay_parent_post_id = NULL WHERE relay_parent_post_id = ?", (post_id,))
+        conn.execute("UPDATE community_posts SET style_template_post_id = NULL WHERE style_template_post_id = ?", (post_id,))
+        conn.execute("DELETE FROM community_posts WHERE id = ?", (post_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    _delete_uploaded_community_image(raw_image_path)
+    return CommunityDeleteResponse(ok=True)
+
+
 def list_comments(user_id: int, post_id: int, offset: int = 0, limit: int = 80) -> CommunityCommentsResponse:
     safe_offset = max(0, int(offset))
     safe_limit = max(1, min(int(limit), 80))
@@ -601,7 +662,11 @@ def load_post_image(post_id: int, user_id: int | None = None) -> tuple[bytes, st
     conn = open_db()
     try:
         row = conn.execute(
-            "SELECT image_path FROM community_posts WHERE id = ? AND moderation_status = 'published'",
+            """
+            SELECT image_path, image_blob, image_mime_type
+            FROM community_posts
+            WHERE id = ? AND moderation_status = 'published'
+            """,
             (post_id,),
         ).fetchone()
     finally:
@@ -610,10 +675,6 @@ def load_post_image(post_id: int, user_id: int | None = None) -> tuple[bytes, st
     if row is None:
         raise HTTPException(status_code=404, detail="community post not found")
 
-    image_path = _resolve_community_image_path(str(row["image_path"] or ""))
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="image file not found")
-
     if user_id is not None and user_id > 0:
         conn = open_db()
         try:
@@ -621,6 +682,15 @@ def load_post_image(post_id: int, user_id: int | None = None) -> tuple[bytes, st
             conn.commit()
         finally:
             conn.close()
+
+    image_blob = row["image_blob"]
+    if image_blob:
+        mime = str(row["image_mime_type"] or "").strip() or "image/jpeg"
+        return bytes(image_blob), mime
+
+    image_path = _resolve_community_image_path(str(row["image_path"] or ""))
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="image file not found")
 
     data = image_path.read_bytes()
     mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
@@ -634,7 +704,7 @@ async def compose_image(user_id: int, req: CommunityComposeRequest) -> Community
         job_type="compose",
         reference_post_id=req.reference_post_id,
         implementation_status=result.implementation_status,
-        request_payload={"strength": req.strength},
+        request_payload={"strength": _effective_creative_strength(req.strength)},
         result_meta={"provider": result.provider, "model": result.model},
     )
     return result
@@ -647,7 +717,7 @@ async def cocreate_compose(user_id: int, req: CommunityCocreateComposeRequest) -
         job_type="cocreate",
         reference_post_id=req.reference_post_id,
         implementation_status=result.implementation_status,
-        request_payload={"strength": req.strength},
+        request_payload={"strength": _effective_creative_strength(req.strength)},
         result_meta={"provider": result.provider, "model": result.model},
     )
     return result
@@ -657,7 +727,7 @@ def create_compose_job(user_id: int, req: CommunityComposeRequest) -> CommunityC
     payload = {
         "reference_post_id": req.reference_post_id,
         "person_image_base64": req.person_image_base64,
-        "strength": req.strength,
+        "strength": _effective_creative_strength(req.strength),
     }
     return _create_creative_job(
         user_id=user_id,
@@ -672,7 +742,7 @@ def create_cocreate_job(user_id: int, req: CommunityCocreateComposeRequest) -> C
         "reference_post_id": req.reference_post_id,
         "person_a_image_base64": req.person_a_image_base64,
         "person_b_image_base64": req.person_b_image_base64,
-        "strength": req.strength,
+        "strength": _effective_creative_strength(req.strength),
     }
     return _create_creative_job(
         user_id=user_id,
@@ -1206,7 +1276,7 @@ def _process_creative_job(trigger_job_id: int | None = None, worker_name: str = 
         _raise_if_job_cancel_requested(job_id)
         if job_type == "compose":
             req = CommunityComposeRequest.model_validate(payload)
-            result = _run_async_with_heartbeat(job_id, _compose_core(req))
+            result = _run_async_with_heartbeat(job_id, _compose_core(req, job_id=job_id))
             _raise_if_job_cancel_requested(job_id)
             _mark_job_success(
                 job_id=job_id,
@@ -1220,7 +1290,7 @@ def _process_creative_job(trigger_job_id: int | None = None, worker_name: str = 
             )
         elif job_type == "cocreate":
             req = CommunityCocreateComposeRequest.model_validate(payload)
-            result = _run_async_with_heartbeat(job_id, _cocreate_core(req))
+            result = _run_async_with_heartbeat(job_id, _cocreate_core(req, job_id=job_id))
             _raise_if_job_cancel_requested(job_id)
             _mark_job_success(
                 job_id=job_id,
@@ -1680,6 +1750,32 @@ def _touch_job_heartbeat(job_id: int) -> bool:
         conn.commit()
         if cur.rowcount > 0 and SETTINGS.creative_queue_backend == "redis":
             _REDIS_QUEUE.set_lease(job_id, _CREATIVE_JOB_LEASE_SEC, "heartbeat")
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def _update_job_progress(job_id: int | None, progress: int) -> bool:
+    if job_id is None:
+        return False
+    safe_progress = max(0, min(99, int(progress)))
+    now = int(time.time())
+    conn = open_db()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE community_creative_jobs
+            SET progress = CASE WHEN progress < ? THEN ? ELSE progress END,
+                heartbeat_at = ?,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE id = ? AND status = 'running'
+            """,
+            (safe_progress, safe_progress, now, now + _CREATIVE_JOB_LEASE_SEC, now, job_id),
+        )
+        conn.commit()
+        if cur.rowcount > 0 and SETTINGS.creative_queue_backend == "redis":
+            _REDIS_QUEUE.set_lease(job_id, _CREATIVE_JOB_LEASE_SEC, "progress")
         return cur.rowcount > 0
     finally:
         conn.close()
@@ -2161,10 +2257,12 @@ def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-async def _compose_core(req: CommunityComposeRequest) -> CommunityComposeResponse:
+async def _compose_core(req: CommunityComposeRequest, job_id: int | None = None) -> CommunityComposeResponse:
     import asyncio
 
+    _update_job_progress(job_id, 24)
     reference_path, scene, place = _load_reference_image_meta(req.reference_post_id)
+    strength = _effective_creative_strength(req.strength)
     person_bytes = _prepare_jpeg_bytes(req.person_image_base64, max_side=SETTINGS.community_upload_max_side)
     reference_bytes = reference_path.read_bytes()
     composed_input = _build_compose_input(
@@ -2174,9 +2272,11 @@ async def _compose_core(req: CommunityComposeRequest) -> CommunityComposeRespons
         scene_type=scene,
     )
     composed_input_b64 = base64.b64encode(composed_input).decode("utf-8")
+    _update_job_progress(job_id, 42)
 
     provider = DoubaoImageEditProvider(config_prefix="COMMUNITY_IMAGE", fallback_prefix="ARK_IMAGE")
     if not _provider_is_ready(provider):
+        _update_job_progress(job_id, 92)
         return CommunityComposeResponse(
             composed_image_base64=composed_input_b64,
             provider="local",
@@ -2194,16 +2294,14 @@ async def _compose_core(req: CommunityComposeRequest) -> CommunityComposeRespons
             provider.retouch(
                 image_base64=composed_input_b64,
                 preset=_preset_for_scene(scene),
-                strength=req.strength,
+                strength=strength,
                 scene_hint=scene,
-                custom_prompt=(
-                    f"参考地点：{place or '未知地点'}。"
-                    "请仅做真实照片级融合优化，保持人物身份、姿态与背景主构图不变。"
-                    "优先修复边缘过渡、光影匹配、肤色一致性。"
-                ),
+                progress_callback=lambda progress: _update_job_progress(job_id, progress),
+                custom_prompt=_compose_prompt(place=place, scene=scene, subject_count=1),
             ),
             timeout=_CREATIVE_PROVIDER_TIMEOUT_SEC,
         )
+        _update_job_progress(job_id, 98)
         return CommunityComposeResponse(
             composed_image_base64=result.image_base64,
             provider=result.provider,
@@ -2213,6 +2311,7 @@ async def _compose_core(req: CommunityComposeRequest) -> CommunityComposeRespons
             placeholder_notes=[],
         )
     except Exception as exc:
+        _update_job_progress(job_id, 92)
         logger.warning("community.compose.fallback reason=%r", exc)
         return CommunityComposeResponse(
             composed_image_base64=composed_input_b64,
@@ -2227,10 +2326,15 @@ async def _compose_core(req: CommunityComposeRequest) -> CommunityComposeRespons
         )
 
 
-async def _cocreate_core(req: CommunityCocreateComposeRequest) -> CommunityCocreateComposeResponse:
+async def _cocreate_core(
+    req: CommunityCocreateComposeRequest,
+    job_id: int | None = None,
+) -> CommunityCocreateComposeResponse:
     import asyncio
 
+    _update_job_progress(job_id, 24)
     reference_path, scene, place = _load_reference_image_meta(req.reference_post_id)
+    strength = _effective_creative_strength(req.strength)
     person_a_bytes = _prepare_jpeg_bytes(req.person_a_image_base64, max_side=SETTINGS.community_upload_max_side)
     person_b_bytes = _prepare_jpeg_bytes(req.person_b_image_base64, max_side=SETTINGS.community_upload_max_side)
     reference_bytes = reference_path.read_bytes()
@@ -2242,9 +2346,11 @@ async def _cocreate_core(req: CommunityCocreateComposeRequest) -> CommunityCocre
         scene_type=scene,
     )
     composed_input_b64 = base64.b64encode(composed_input).decode("utf-8")
+    _update_job_progress(job_id, 42)
 
     provider = DoubaoImageEditProvider(config_prefix="COMMUNITY_IMAGE", fallback_prefix="ARK_IMAGE")
     if not _provider_is_ready(provider):
+        _update_job_progress(job_id, 92)
         return CommunityCocreateComposeResponse(
             composed_image_base64=composed_input_b64,
             provider="local",
@@ -2262,16 +2368,14 @@ async def _cocreate_core(req: CommunityCocreateComposeRequest) -> CommunityCocre
             provider.retouch(
                 image_base64=composed_input_b64,
                 preset=_preset_for_scene(scene),
-                strength=req.strength,
+                strength=strength,
                 scene_hint=scene,
-                custom_prompt=(
-                    f"参考地点：{place or '未知地点'}。"
-                    "请仅做真实照片级双人融合优化，保持两位人物身份与构图位置基本一致。"
-                    "优先修复双人边缘粘连、光线方向、皮肤色温与投影一致性。"
-                ),
+                progress_callback=lambda progress: _update_job_progress(job_id, progress),
+                custom_prompt=_compose_prompt(place=place, scene=scene, subject_count=2),
             ),
             timeout=_CREATIVE_PROVIDER_TIMEOUT_SEC,
         )
+        _update_job_progress(job_id, 98)
         return CommunityCocreateComposeResponse(
             composed_image_base64=result.image_base64,
             provider=result.provider,
@@ -2281,6 +2385,7 @@ async def _cocreate_core(req: CommunityCocreateComposeRequest) -> CommunityCocre
             placeholder_notes=[],
         )
     except Exception as exc:
+        _update_job_progress(job_id, 92)
         logger.warning("community.cocreate.fallback reason=%r", exc)
         return CommunityCocreateComposeResponse(
             composed_image_base64=composed_input_b64,
@@ -2302,6 +2407,56 @@ def _preset_for_scene(scene_type: str) -> str:
     if scene in {"food", "night", "landscape"}:
         return "color_grade"
     return "bg_cleanup"
+
+
+def _compose_prompt(place: str, scene: str, subject_count: int) -> str:
+    safe_place = place or "unknown place"
+    safe_scene = _normalize_scene_type(scene)
+    if subject_count <= 1:
+        return (
+            f"Reference location: {safe_place}. Scene type: {safe_scene}. "
+            "Use the uploaded person as the only foreground human subject. "
+            "Treat the current composite only as a rough layout guide, not the final desired look. "
+            "Keep the original background framing, horizon, and aspect ratio unchanged. "
+            "First isolate a clean subject matte from the uploaded person and remove the original source background clutter before blending. "
+            "First analyze the visible facial structure, hairstyle, expression, skin tone, clothing type, clothing colors, "
+            "body build, age impression, and pose intent of the uploaded person. "
+            "Place this person in the most plausible position inside the selected reference background, "
+            "matching the original framing, camera height, perspective, subject-to-camera distance, body scale, foot contact, and horizon. "
+            "If the reference image already contains a person, replace that person with the uploaded subject "
+            "instead of stacking or duplicating people. "
+            "Preserve identity, face, body shape, clothing category, clothing colors, and pose intent of the uploaded person. "
+            "Rebuild the visible person naturally into the scene instead of pasting a cropped portrait on top of the background. "
+            "Never invent missing body parts, never generate a new body, never extend the crop, and never reveal any body area that is not already visible in the uploaded image. "
+            "If the uploaded image only shows head, upper body, or three-quarter body, keep exactly that same visible coverage in the final image. "
+            "Do not complete the lower body, do not add legs, do not add shoes, and do not fabricate arms or hands that are not visible. "
+            "Prefer a slightly smaller and more believable subject over an oversized subject. "
+            "Do not output an oversized head, floating face, face swap, pasted portrait, or tight face-dominant crop. "
+            "The final subject must read as one believable person photographed inside the scene. "
+            "Rebuild clean hair, hand, arm, leg, and clothing edges with natural matte transitions. "
+            "Match lighting direction, exposure, white balance, contrast, skin tone, ground shadow, reflections, "
+            "and depth of field to the background. "
+            "Keep the environment and background composition stable, only removing overlap artifacts from the old subject area. "
+            "The final output must look like one realistic photograph, never like a sticker, collage, ghost image, or hard overlay."
+        )
+    return (
+        f"Reference location: {safe_place}. Scene type: {safe_scene}. "
+        "Use the two uploaded people as the only human subjects in the scene. "
+        "Treat the current composite only as a rough layout guide, not the final desired look. "
+        "Keep the original background framing, horizon, and aspect ratio unchanged. "
+        "First isolate clean subject mattes for both uploaded people and remove the original source background clutter before blending. "
+        "First analyze each person's visible face, hairstyle, expression, clothing type, clothing colors, body build, "
+        "and pose intent. "
+        "Place both people naturally into the selected reference background with believable spacing, eye lines, "
+        "perspective, scale, contact shadows, and interaction with the environment. "
+        "If the reference image already contains people, replace them with the uploaded subjects instead of stacking duplicates. "
+        "Preserve each person's identity, pose intent, clothing category, and clothing colors while fixing edge matting and overlap artifacts. "
+        "Rebuild both visible people naturally into the scene instead of pasting two portrait cutouts on top of the background. "
+        "Never invent missing limbs or bodies, never extend partial crops, and never reveal any body area that is not already visible in the uploaded photos. "
+        "Prefer slightly smaller and more believable people over oversized people. "
+        "Do not output oversized heads, floating faces, or pasted-portrait looking subjects. "
+        "Match lighting, color temperature, skin tone, ground shadows, and focus depth so the result reads as one real photo."
+    )
 
 
 # -----------------------------
@@ -2395,6 +2550,10 @@ def _normalize_place_tag(text: str) -> str:
     return compact[:48]
 
 
+def _effective_creative_strength(_value: float | None = None) -> float:
+    return _AUTO_COMPOSE_STRENGTH
+
+
 def _normalize_caption(text: str) -> str:
     compact = " ".join((text or "").strip().split())
     return compact[:280]
@@ -2486,6 +2645,27 @@ def _resolve_community_image_path(raw_path: str) -> Path:
     return resolved
 
 
+def _delete_uploaded_community_image(raw_path: str) -> bool:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return True
+    try:
+        resolved = _resolve_community_image_path(raw)
+    except HTTPException:
+        return False
+
+    upload_root = SETTINGS.community_upload_dir.resolve()
+    if upload_root not in resolved.parents:
+        return False
+    if not resolved.exists():
+        return True
+    try:
+        resolved.unlink()
+    except Exception:
+        return False
+    return True
+
+
 def _load_reference_image_meta(reference_post_id: int) -> tuple[Path, str, str]:
     conn = open_db()
     try:
@@ -2516,49 +2696,266 @@ def _scene_layout_profile(scene_type: str, subject_count: int) -> tuple[list[flo
     scene = _normalize_scene_type(scene_type)
     if subject_count <= 1:
         if scene == "portrait":
-            return [0.5], [0.93], 0.44, 0.68
+            return [0.5], [0.93], 0.32, 0.54
         if scene == "night":
-            return [0.52], [0.94], 0.36, 0.60
+            return [0.52], [0.94], 0.27, 0.45
         if scene == "landscape":
-            return [0.58], [0.94], 0.34, 0.56
+            return [0.58], [0.94], 0.25, 0.42
         if scene == "food":
-            return [0.5], [0.94], 0.38, 0.58
-        return [0.5], [0.94], 0.4, 0.62
+            return [0.5], [0.94], 0.28, 0.44
+        return [0.5], [0.94], 0.28, 0.46
 
     if scene == "portrait":
-        return [0.34, 0.68], [0.94, 0.94], 0.30, 0.54
+        return [0.34, 0.68], [0.94, 0.94], 0.22, 0.40
     if scene == "night":
-        return [0.33, 0.69], [0.95, 0.95], 0.26, 0.5
+        return [0.33, 0.69], [0.95, 0.95], 0.20, 0.36
     if scene == "landscape":
-        return [0.31, 0.71], [0.95, 0.95], 0.25, 0.48
-    return [0.34, 0.68], [0.95, 0.95], 0.28, 0.5
+        return [0.31, 0.71], [0.95, 0.95], 0.19, 0.34
+    return [0.34, 0.68], [0.95, 0.95], 0.20, 0.36
+
+
+def _detect_subject_bbox_norm(
+    image_bytes: bytes,
+    scene_hint: str,
+    capture_mode: str,
+) -> list[float] | None:
+    try:
+        result = _SUBJECT_FUSION_DETECTOR.detect(
+            image_bytes=image_bytes,
+            capture_mode=capture_mode,
+            scene_hint=scene_hint,
+        )
+    except Exception:
+        return None
+    bbox = result.bbox_norm
+    if not bbox or len(bbox) != 4:
+        return None
+    x1, y1, x2, y2 = [float(value) for value in bbox]
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    x2 = max(0.0, min(1.0, x2))
+    y2 = max(0.0, min(1.0, y2))
+    if (x2 - x1) < 0.04 or (y2 - y1) < 0.08:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _expand_bbox_norm(
+    bbox_norm: list[float],
+    pad_x_ratio: float,
+    pad_top_ratio: float,
+    pad_bottom_ratio: float,
+) -> list[float]:
+    x1, y1, x2, y2 = bbox_norm
+    width = max(0.02, x2 - x1)
+    height = max(0.02, y2 - y1)
+    return [
+        max(0.0, x1 - width * pad_x_ratio),
+        max(0.0, y1 - height * pad_top_ratio),
+        min(1.0, x2 + width * pad_x_ratio),
+        min(1.0, y2 + height * pad_bottom_ratio),
+    ]
+
+
+def _bbox_norm_to_pixels(size: tuple[int, int], bbox_norm: list[float]) -> tuple[int, int, int, int]:
+    width, height = size
+    x1, y1, x2, y2 = bbox_norm
+    left = max(0, min(width - 1, int(round(x1 * width))))
+    top = max(0, min(height - 1, int(round(y1 * height))))
+    right = max(left + 1, min(width, int(round(x2 * width))))
+    bottom = max(top + 1, min(height, int(round(y2 * height))))
+    return left, top, right, bottom
+
+
+def _soft_clear_reference_subject(bg: Image.Image, bbox_norm: list[float]) -> Image.Image:
+    cleared = bg.convert("RGBA")
+    blurred = bg.filter(ImageFilter.GaussianBlur(radius=max(12, int(min(bg.size) * 0.018)))).convert("RGBA")
+    left, top, right, bottom = _bbox_norm_to_pixels(
+        bg.size,
+        _expand_bbox_norm(bbox_norm, pad_x_ratio=0.22, pad_top_ratio=0.14, pad_bottom_ratio=0.12),
+    )
+    mask = Image.new("L", bg.size, color=0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle(
+        (left, top, right, bottom),
+        radius=max(20, int(min(right - left, bottom - top) * 0.22)),
+        fill=224,
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(12, int(min(bg.size) * 0.016))))
+    return Image.composite(blurred, cleared, mask).convert("RGB")
+
+
+def _fit_subject_to_box(subject: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    safe_target_w = max(32, int(target_width))
+    safe_target_h = max(32, int(target_height))
+    width_scale = safe_target_w / max(1, subject.width)
+    height_scale = safe_target_h / max(1, subject.height)
+    scale = max(0.1, min(width_scale, height_scale))
+    resized = subject.resize(
+        (
+            max(1, int(round(subject.width * scale))),
+            max(1, int(round(subject.height * scale))),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+    return resized
+
+
+def _subject_scale_bias_from_bbox(bbox_norm: list[float] | None) -> float:
+    if not bbox_norm or len(bbox_norm) != 4:
+        return 1.0
+    width = max(0.01, float(bbox_norm[2]) - float(bbox_norm[0]))
+    height = max(0.01, float(bbox_norm[3]) - float(bbox_norm[1]))
+    area = width * height
+    if area >= 0.42 or height >= 0.82:
+        return 0.68
+    if area >= 0.30 or height >= 0.70:
+        return 0.78
+    if area >= 0.22 or height >= 0.58:
+        return 0.88
+    return 1.0
+
+
+def _keep_primary_foreground_component(mask: np.ndarray) -> np.ndarray:
+    binary = (mask > 0).astype(np.uint8)
+    component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if component_count <= 1:
+        return mask
+
+    total_area = max(1.0, float(binary.shape[0] * binary.shape[1]))
+    best_label = 0
+    best_score = -1.0
+    for label in range(1, component_count):
+        area = float(stats[label, cv2.CC_STAT_AREA])
+        if area < total_area * 0.006:
+            continue
+        cx, cy = centroids[label]
+        center_x = float(cx) / max(1.0, float(binary.shape[1]))
+        center_y = float(cy) / max(1.0, float(binary.shape[0]))
+        center_score = 1.0 - min(1.0, abs(center_x - 0.5) * 1.4 + abs(center_y - 0.56) * 1.1)
+        score = (area / total_area) + center_score * 0.35
+        if score > best_score:
+            best_score = score
+            best_label = label
+
+    if best_label <= 0:
+        return mask
+    kept = np.where(labels == best_label, 255, 0).astype(np.uint8)
+    return kept
+
+
+def _extract_subject_foreground(source: Image.Image) -> Image.Image:
+    rgba = source.convert("RGBA")
+    if rgba.width < 24 or rgba.height < 24:
+        return rgba
+
+    rgb = rgba.convert("RGB")
+    rgb_array = np.array(rgb)
+    bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+    height, width = bgr_array.shape[:2]
+
+    mask = np.full((height, width), cv2.GC_PR_BGD, dtype=np.uint8)
+    border_x = max(3, int(width * 0.07))
+    border_top = max(3, int(height * 0.04))
+    border_bottom = max(3, int(height * 0.03))
+    mask[:border_top, :] = cv2.GC_BGD
+    mask[height - border_bottom :, :] = cv2.GC_BGD
+    mask[:, :border_x] = cv2.GC_BGD
+    mask[:, width - border_x :] = cv2.GC_BGD
+
+    body_left = max(border_x + 1, int(width * 0.16))
+    body_right = min(width - border_x - 1, int(width * 0.84))
+    body_top = max(border_top + 1, int(height * 0.04))
+    body_bottom = min(height - border_bottom - 1, int(height * 0.97))
+    mask[body_top:body_bottom, body_left:body_right] = cv2.GC_PR_FGD
+
+    ellipse_mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.ellipse(
+        ellipse_mask,
+        center=(width // 2, int(height * 0.44)),
+        axes=(max(6, int(width * 0.24)), max(8, int(height * 0.42))),
+        angle=0,
+        startAngle=0,
+        endAngle=360,
+        color=255,
+        thickness=-1,
+    )
+    mask[ellipse_mask > 0] = cv2.GC_FGD
+
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(bgr_array, mask, None, bgd_model, fgd_model, 4, cv2.GC_INIT_WITH_MASK)
+    except Exception:
+        return rgba
+
+    alpha = np.where(
+        (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD),
+        255,
+        0,
+    ).astype(np.uint8)
+    kernel_size = max(3, int(min(width, height) * 0.045))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, kernel, iterations=1)
+    alpha = cv2.morphologyEx(alpha, cv2.MORPH_OPEN, kernel, iterations=1)
+    alpha = _keep_primary_foreground_component(alpha)
+    blur_radius = max(1, int(min(width, height) * 0.018))
+    alpha = cv2.GaussianBlur(alpha, (0, 0), sigmaX=blur_radius, sigmaY=blur_radius)
+
+    existing_alpha = np.array(rgba.getchannel("A"), dtype=np.uint8)
+    alpha = np.minimum(existing_alpha, alpha)
+    if int(alpha.max()) <= 8:
+        return rgba
+
+    rgba_array = np.dstack((rgb_array, alpha)).astype(np.uint8)
+    extracted = Image.fromarray(rgba_array, mode="RGBA")
+    alpha_bbox = extracted.getchannel("A").getbbox()
+    if alpha_bbox is None:
+        return rgba
+
+    left, top, right, bottom = alpha_bbox
+    pad_x = max(2, int((right - left) * 0.03))
+    pad_y = max(2, int((bottom - top) * 0.03))
+    return extracted.crop(
+        (
+            max(0, left - pad_x),
+            max(0, top - pad_y),
+            min(extracted.width, right + pad_x),
+            min(extracted.height, bottom + pad_y),
+        )
+    )
 
 
 def _prepare_subject_layer(
     source: Image.Image,
+    source_bytes: bytes,
     bg: Image.Image,
     scene_type: str,
     max_fg_w: int,
     max_fg_h: int,
 ) -> Image.Image:
     fg = ImageOps.exif_transpose(source).convert("RGBA")
+    detected_bbox = _detect_subject_bbox_norm(
+        image_bytes=source_bytes,
+        scene_hint="portrait",
+        capture_mode="portrait",
+    )
+    if detected_bbox is not None:
+        crop_box = _bbox_norm_to_pixels(
+            fg.size,
+            _expand_bbox_norm(
+                detected_bbox,
+                pad_x_ratio=0.26,
+                pad_top_ratio=0.18,
+                pad_bottom_ratio=0.28,
+            ),
+        )
+        fg = fg.crop(crop_box)
+    fg = _extract_subject_foreground(fg)
     fg.thumbnail((max_fg_w, max_fg_h), Image.Resampling.LANCZOS)
-
     existing_alpha = fg.getchannel("A") if "A" in fg.getbands() else Image.new("L", fg.size, color=255)
-    mask = Image.new("L", fg.size, color=0)
-    draw = ImageDraw.Draw(mask)
-    w, h = fg.size
-    draw.rounded_rectangle(
-        (int(w * 0.08), int(h * 0.03), int(w * 0.92), int(h * 0.98)),
-        radius=max(12, int(min(w, h) * 0.16)),
-        fill=224,
-    )
-    draw.ellipse(
-        (int(w * 0.16), int(h * 0.02), int(w * 0.84), int(h * 0.48)),
-        fill=255,
-    )
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(8, int(min(w, h) * 0.055))))
-    alpha = ImageChops.multiply(existing_alpha, mask)
 
     scene = _normalize_scene_type(scene_type)
     sample_box = (
@@ -2574,7 +2971,7 @@ def _prepare_subject_layer(
     if scene == "night":
         harmonized = harmonized.filter(ImageFilter.GaussianBlur(radius=0.2))
     prepared = harmonized.convert("RGBA")
-    prepared.putalpha(alpha)
+    prepared.putalpha(existing_alpha.filter(ImageFilter.GaussianBlur(radius=max(1, int(min(fg.size) * 0.012)))))
     return prepared
 
 
@@ -2609,20 +3006,59 @@ def _build_compose_input(reference_bytes: bytes, person_bytes: bytes, max_side: 
         with Image.open(io.BytesIO(person_bytes)) as person_img:
             bg = ImageOps.exif_transpose(ref_img).convert("RGB")
             scene = _normalize_scene_type(scene_type)
+            source_subject_bbox = _detect_subject_bbox_norm(
+                image_bytes=person_bytes,
+                scene_hint="portrait",
+                capture_mode="portrait",
+            )
+            source_scale_bias = _subject_scale_bias_from_bbox(source_subject_bbox)
             if max(bg.size) > max_side:
                 bg.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
 
-            anchors_x, anchors_y, width_ratio, height_ratio = _scene_layout_profile(scene, 1)
+            reference_subject_bbox = _detect_subject_bbox_norm(
+                image_bytes=reference_bytes,
+                scene_hint=scene,
+                capture_mode="auto",
+            )
+            if reference_subject_bbox is not None:
+                bg = _soft_clear_reference_subject(bg, reference_subject_bbox)
+                target_left, target_top, target_right, target_bottom = _bbox_norm_to_pixels(
+                    bg.size,
+                    _expand_bbox_norm(
+                        reference_subject_bbox,
+                        pad_x_ratio=0.06,
+                        pad_top_ratio=0.03,
+                        pad_bottom_ratio=0.02,
+                    ),
+                )
+                target_width = max(64, int((target_right - target_left) * 0.82))
+                target_height = max(96, int((target_bottom - target_top) * 0.86))
+            else:
+                anchors_x, anchors_y, width_ratio, height_ratio = _scene_layout_profile(scene, 1)
+                target_width = max(64, int(bg.width * width_ratio))
+                target_height = max(96, int(bg.height * height_ratio))
+                target_center_x = int(bg.width * anchors_x[0])
+                target_bottom = int(bg.height * anchors_y[0])
+                target_left = target_center_x - target_width // 2
+                target_right = target_left + target_width
+                target_top = target_bottom - target_height
+
             fg = _prepare_subject_layer(
                 source=person_img,
+                source_bytes=person_bytes,
                 bg=bg,
                 scene_type=scene,
-                max_fg_w=max(64, int(bg.width * width_ratio)),
-                max_fg_h=max(64, int(bg.height * height_ratio)),
+                max_fg_w=max(64, int(target_width * 0.98)),
+                max_fg_h=max(96, int(target_height * 1.00)),
             )
-            x = int(bg.width * anchors_x[0]) - fg.width // 2
-            baseline_y = int(bg.height * anchors_y[0])
-            y = baseline_y - fg.height
+            fg = _fit_subject_to_box(
+                fg,
+                target_width=int(target_width * 0.90 * source_scale_bias),
+                target_height=int(target_height * 0.92 * source_scale_bias),
+            )
+            target_center_x = (target_left + target_right) // 2
+            x = target_center_x - fg.width // 2
+            y = target_bottom - fg.height
             x = max(0, min(x, bg.width - fg.width))
             y = max(0, min(y, bg.height - fg.height))
 
@@ -2653,6 +3089,18 @@ def _build_cocreate_input(
             with Image.open(io.BytesIO(person_b_bytes)) as person_b_img:
                 bg = ImageOps.exif_transpose(ref_img).convert("RGB")
                 scene = _normalize_scene_type(scene_type)
+                person_a_bbox = _detect_subject_bbox_norm(
+                    image_bytes=person_a_bytes,
+                    scene_hint="portrait",
+                    capture_mode="portrait",
+                )
+                person_b_bbox = _detect_subject_bbox_norm(
+                    image_bytes=person_b_bytes,
+                    scene_hint="portrait",
+                    capture_mode="portrait",
+                )
+                person_a_scale_bias = _subject_scale_bias_from_bbox(person_a_bbox)
+                person_b_scale_bias = _subject_scale_bias_from_bbox(person_b_bbox)
 
                 if max(bg.size) > max_side:
                     bg.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
@@ -2660,17 +3108,29 @@ def _build_cocreate_input(
                 anchors_x, anchors_y, width_ratio, height_ratio = _scene_layout_profile(scene, 2)
                 fg_a = _prepare_subject_layer(
                     source=person_a_img,
+                    source_bytes=person_a_bytes,
                     bg=bg,
                     scene_type=scene,
                     max_fg_w=max(64, int(bg.width * width_ratio)),
                     max_fg_h=max(64, int(bg.height * height_ratio)),
                 )
+                fg_a = _fit_subject_to_box(
+                    fg_a,
+                    target_width=max(64, int(bg.width * width_ratio * 0.88 * person_a_scale_bias)),
+                    target_height=max(64, int(bg.height * height_ratio * 0.90 * person_a_scale_bias)),
+                )
                 fg_b = _prepare_subject_layer(
                     source=person_b_img,
+                    source_bytes=person_b_bytes,
                     bg=bg,
                     scene_type=scene,
                     max_fg_w=max(64, int(bg.width * width_ratio)),
                     max_fg_h=max(64, int(bg.height * height_ratio)),
+                )
+                fg_b = _fit_subject_to_box(
+                    fg_b,
+                    target_width=max(64, int(bg.width * width_ratio * 0.88 * person_b_scale_bias)),
+                    target_height=max(64, int(bg.height * height_ratio * 0.90 * person_b_scale_bias)),
                 )
 
                 canvas = bg.convert("RGBA")

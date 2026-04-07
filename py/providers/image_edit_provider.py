@@ -4,7 +4,9 @@ import base64
 import io
 import logging
 import os
+import textwrap
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +24,12 @@ class RetouchResult:
     image_base64: str
     provider: str
     model: str
+
+
+@dataclass(frozen=True)
+class SourceImageGeometry:
+    size: tuple[int, int]
+    orientation: str
 
 
 class DoubaoImageEditProvider:
@@ -52,6 +60,7 @@ class DoubaoImageEditProvider:
         strength: float,
         scene_hint: str | None,
         custom_prompt: str | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> RetouchResult:
         if not self.api_key:
             raise RuntimeError("ARK_IMAGE_API_KEY missing")
@@ -67,13 +76,18 @@ class DoubaoImageEditProvider:
             self.size,
             self.response_format,
         )
-        upload_base64, resized, source_orientation = self._prepare_image_for_upload(image_base64)
-        if resized:
+        upload_base64, prep_meta = self._prepare_image_for_upload(image_base64)
+        source_geometry = SourceImageGeometry(
+            size=prep_meta["source_size"],
+            orientation=prep_meta["source_orientation"],
+        )
+        if prep_meta["resized"]:
             logger.info("retouch.input resized_to_2k max_side=%d", self.max_input_side)
         logger.info(
-            "retouch.provider.prepared resized=%s orientation=%s input_chars=%d upload_chars=%d",
-            resized,
-            source_orientation,
+            "retouch.provider.prepared resized=%s source_size=%s orientation=%s input_chars=%d upload_chars=%d",
+            prep_meta["resized"],
+            source_geometry.size,
+            source_geometry.orientation,
             len(image_base64 or ""),
             len(upload_base64 or ""),
         )
@@ -87,6 +101,7 @@ class DoubaoImageEditProvider:
             "retouch.provider.prompt preview=%s",
             prompt.replace("\n", " ").strip()[:240],
         )
+        self._emit_progress(progress_callback, 56)
 
         base_payload = {
             "model": self.model,
@@ -118,6 +133,7 @@ class DoubaoImageEditProvider:
                         image_variant,
                         self.timeout_sec,
                     )
+                    self._emit_progress(progress_callback, 62)
                     resp = await client.post(self.api_url, headers=headers, json=payload)
                     upstream_req = self._extract_upstream_request_id(resp)
                     logger.info(
@@ -128,19 +144,25 @@ class DoubaoImageEditProvider:
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    b64 = await self._extract_image_base64(client, data)
+                    self._emit_progress(progress_callback, 78)
+                    b64 = await self._extract_image_base64(
+                        client,
+                        data,
+                        progress_callback=progress_callback,
+                    )
                     if b64:
-                        fixed_b64, orientation_fixed = self._align_output_orientation(
+                        fixed_b64, geometry_fixed = self._normalize_output_geometry(
                             b64,
-                            source_orientation=source_orientation,
+                            source_geometry=source_geometry,
                         )
+                        self._emit_progress(progress_callback, 96)
                         logger.info(
-                            "retouch.provider.success attempt=%d upstream_req=%s elapsed_ms=%d output_chars=%d orientation_fixed=%s",
+                            "retouch.provider.success attempt=%d upstream_req=%s elapsed_ms=%d output_chars=%d geometry_fixed=%s",
                             index,
                             upstream_req,
                             int((time.perf_counter() - start_ts) * 1000),
                             len(fixed_b64),
-                            orientation_fixed,
+                            geometry_fixed,
                         )
                         return RetouchResult(
                             image_base64=fixed_b64,
@@ -178,7 +200,7 @@ class DoubaoImageEditProvider:
 
         raise RuntimeError(f"Doubao retouch failed: {last_error}")
 
-    def _prepare_image_for_upload(self, image_base64: str) -> tuple[str, bool, str]:
+    def _prepare_image_for_upload(self, image_base64: str) -> tuple[str, dict[str, Any]]:
         cleaned = self._normalize_base64_image(image_base64)
         try:
             raw = base64.b64decode(cleaned, validate=True)
@@ -188,14 +210,23 @@ class DoubaoImageEditProvider:
         try:
             with Image.open(io.BytesIO(raw)) as image:
                 display_image = ImageOps.exif_transpose(image)
-                source_orientation = self._orientation_by_size(display_image.size)
                 rgb = display_image.convert("RGB")
-                if max(rgb.size) <= self.max_input_side:
-                    return cleaned, False, source_orientation
-                rgb.thumbnail((self.max_input_side, self.max_input_side), Image.Resampling.LANCZOS)
+                source_size = rgb.size
+                source_orientation = self._orientation_by_size(source_size)
+                resized = False
+                if max(rgb.size) > self.max_input_side:
+                    rgb.thumbnail((self.max_input_side, self.max_input_side), Image.Resampling.LANCZOS)
+                    resized = True
                 out = io.BytesIO()
                 rgb.save(out, format="JPEG", quality=self.jpeg_quality, optimize=True)
-                return base64.b64encode(out.getvalue()).decode("utf-8"), True, source_orientation
+                return (
+                    base64.b64encode(out.getvalue()).decode("utf-8"),
+                    {
+                        "resized": resized,
+                        "source_size": source_size,
+                        "source_orientation": source_orientation,
+                    },
+                )
         except Exception as exc:
             raise RuntimeError("invalid image bytes") from exc
 
@@ -205,51 +236,80 @@ class DoubaoImageEditProvider:
             return "square"
         return "landscape" if width > height else "portrait"
 
-    def _align_output_orientation(self, image_base64: str, source_orientation: str) -> tuple[str, bool]:
-        if source_orientation not in {"landscape", "portrait"}:
-            return image_base64, False
-
+    def _normalize_output_geometry(
+        self,
+        image_base64: str,
+        source_geometry: SourceImageGeometry,
+    ) -> tuple[str, bool]:
         cleaned = self._normalize_base64_image(image_base64)
         try:
             raw = base64.b64decode(cleaned, validate=True)
         except Exception:
-            logger.warning("retouch.provider.orientation skip reason=invalid_output_base64")
+            logger.warning("retouch.provider.geometry skip reason=invalid_output_base64")
             return image_base64, False
 
         try:
             with Image.open(io.BytesIO(raw)) as image:
                 output = ImageOps.exif_transpose(image).convert("RGB")
-                output_orientation = self._orientation_by_size(output.size)
-                if output_orientation == source_orientation:
-                    return cleaned, False
-                if output_orientation == "square":
-                    return cleaned, False
+                geometry_fixed = False
+                output, orientation_fixed = self._rotate_output_to_match_orientation(
+                    output,
+                    source_geometry.orientation,
+                )
+                geometry_fixed = geometry_fixed or orientation_fixed
 
-                rotate_cw = output.rotate(90, expand=True)
-                fixed = rotate_cw
-                if self._orientation_by_size(rotate_cw.size) != source_orientation:
-                    rotate_ccw = output.rotate(-90, expand=True)
-                    if self._orientation_by_size(rotate_ccw.size) == source_orientation:
-                        fixed = rotate_ccw
+                output_ratio = output.width / max(1, output.height)
+                source_ratio = source_geometry.size[0] / max(1, source_geometry.size[1])
+                ratio_delta = abs(output_ratio - source_ratio)
+                if output.size != source_geometry.size or ratio_delta > 0.003:
+                    if ratio_delta <= 0.01:
+                        output = output.resize(source_geometry.size, Image.Resampling.LANCZOS)
                     else:
-                        logger.warning(
-                            "retouch.provider.orientation skip reason=cannot_match source=%s output=%s",
-                            source_orientation,
-                            output_orientation,
+                        output = ImageOps.fit(
+                            output,
+                            source_geometry.size,
+                            method=Image.Resampling.LANCZOS,
+                            centering=(0.5, 0.45),
                         )
-                        return cleaned, False
+                    geometry_fixed = True
 
                 out = io.BytesIO()
-                fixed.save(out, format="JPEG", quality=self.jpeg_quality, optimize=True)
-                logger.info(
-                    "retouch.provider.orientation fixed source=%s output=%s",
-                    source_orientation,
-                    output_orientation,
-                )
-                return base64.b64encode(out.getvalue()).decode("utf-8"), True
+                output.save(out, format="JPEG", quality=self.jpeg_quality, optimize=True)
+                if geometry_fixed:
+                    logger.info(
+                        "retouch.provider.geometry fixed source_size=%s source_orientation=%s final_size=%s",
+                        source_geometry.size,
+                        source_geometry.orientation,
+                        output.size,
+                    )
+                return base64.b64encode(out.getvalue()).decode("utf-8"), geometry_fixed
         except Exception as exc:
-            logger.warning("retouch.provider.orientation skip reason=%r", exc)
+            logger.warning("retouch.provider.geometry skip reason=%r", exc)
             return image_base64, False
+
+    def _rotate_output_to_match_orientation(
+        self,
+        output: Image.Image,
+        source_orientation: str,
+    ) -> tuple[Image.Image, bool]:
+        if source_orientation not in {"landscape", "portrait"}:
+            return output, False
+        output_orientation = self._orientation_by_size(output.size)
+        if output_orientation in {source_orientation, "square"}:
+            return output, False
+
+        rotate_cw = output.rotate(90, expand=True)
+        if self._orientation_by_size(rotate_cw.size) == source_orientation:
+            return rotate_cw, True
+        rotate_ccw = output.rotate(-90, expand=True)
+        if self._orientation_by_size(rotate_ccw.size) == source_orientation:
+            return rotate_ccw, True
+        logger.warning(
+            "retouch.provider.geometry skip reason=cannot_match source=%s output=%s",
+            source_orientation,
+            output_orientation,
+        )
+        return output, False
 
     def _normalize_base64_image(self, image_base64: str) -> str:
         text = image_base64.strip()
@@ -264,7 +324,6 @@ class DoubaoImageEditProvider:
             "bg_cleanup": "bg_cleanup",
             "portrait_beauty": "portrait_beauty",
             "color_grade": "color_grade",
-            # Backward compatibility for old client presets.
             "natural": "portrait_beauty",
             "portrait": "portrait_beauty",
             "food": "color_grade",
@@ -288,59 +347,81 @@ class DoubaoImageEditProvider:
         if not custom_text and preset_key == "portrait_beauty":
             applied_strength = max(strength_norm, self.portrait_strength_floor)
         strength_pct = int(applied_strength * 100)
-        subject_lock = (
-            "这是图像修图任务，不是文生图。"
-            "必须严格基于输入原图做后期优化，保持原图主体种类、数量、位置、姿态与构图。"
-            "禁止新增、删除、替换主体；禁止凭空生成人物、动物、建筑或道具。"
-            "若原图无人像，严禁新增人物；若原图有人像，仅允许轻度美化，不改变身份与五官特征。"
-            "禁止换脸、二次创作、夸张重绘、卡通化。"
-        )
+
+        subject_lock = textwrap.dedent(
+            """
+            This is an image editing task, not a new image generation task.
+            Keep the original camera orientation, original canvas aspect ratio, and the overall framing of the input photo.
+            Do not rotate the image sideways and do not change it into a different crop ratio.
+            Preserve the number of subjects, their identity, visible body coverage, pose intent, and the main scene layout.
+            Do not add or remove people, body parts, props, or buildings.
+            No face swap, no pasted portrait look, no floating face, no oversized head, no hard cutout edges, and no cartoon rendering.
+            """
+        ).strip().replace("\n", " ")
 
         if custom_text:
-            return (
-                f"{subject_lock}"
-                "你是手机摄影修图助手，仅执行照片级后期优化。"
-                f"场景参考：{scene_text}。强度：{strength_pct}%。"
-                f"用户要求：{custom_text}。"
-                "严格限制：仅允许去除杂乱背景、调色、曝光/白平衡优化、人像皮肤和细节优化；"
-                "若用户要求与上述限制冲突，以上述限制为准。"
-                "输出仅为处理后的图片。"
-            )
+            return textwrap.dedent(
+                f"""
+                {subject_lock}
+                Scene hint: {scene_text}. Blend intensity: {strength_pct}%.
+                Edit brief: {custom_text}
+                Rebuild the visible person or people as a natural part of the same photograph.
+                Keep the subject scale believable for the scene perspective, horizon, and camera distance.
+                Prefer a slightly smaller and more natural person over an oversized person.
+                Keep head size natural relative to the whole frame and avoid tight face-dominant framing unless the input already is a close portrait.
+                Match perspective, lighting direction, exposure, white balance, depth of field, contact shadows, reflections, and edge transitions.
+                Preserve the uploaded identity, clothing category, clothing colors, and visible pose coverage.
+                Never invent missing limbs, never fabricate a larger body, and never reveal body areas that are not visible in the input.
+                Return only the final edited image.
+                """
+            ).strip().replace("\n", " ")
 
         preset_map = {
-            "bg_cleanup": "清理和弱化杂乱背景元素，主体保持清晰自然，不改变主体身份与姿态。",
-            "portrait_beauty": (
-                "以自然人像精修为目标，重点优化脸部观感："
-                "轻度改善肤质和肤色不均，优化眼周暗沉与法令纹观感，"
-                "增强眼睛与唇部细节清晰度，提升面部立体感与光泽；"
-                "保持五官比例、身份特征和真实皮肤纹理，严禁过度磨皮和网红脸。"
+            "bg_cleanup": (
+                "Clean distracting background clutter, repair small artifacts, and keep the subject natural. "
+                "Do not change identity, pose, or composition."
             ),
-            "color_grade": "进行电影感调色与层次增强，优化对比与色温，保持真实细节。",
+            "portrait_beauty": (
+                "Do natural portrait cleanup only: improve uneven skin tone, reduce minor blemishes, "
+                "and enhance eyes and facial clarity while keeping realistic skin texture and facial proportions. "
+                "No plastic skin and no influencer-face reshaping."
+            ),
+            "color_grade": (
+                "Improve tonal balance, contrast, color temperature, and depth while keeping realistic details. "
+                "Do not redesign the scene or alter subject scale."
+            ),
         }
         preset_text = preset_map[preset_key]
         if scene_text != "portrait":
-            preset_text += "当前场景不是人像场景，禁止生成或引入人物。"
-        return (
-            f"{subject_lock}"
-            "请执行照片级修图，仅输出处理后的图片。"
-            f"场景参考：{scene_text}。"
-            f"模板：{preset_key}。"
-            f"强度：{strength_pct}%。"
-            f"要求：{preset_text}"
-            "限制：仅做去杂乱背景、调色和轻度人像优化，不做主体替换或夸张重绘。"
-        )
+            preset_text += " If the input does not already contain a person, do not introduce one."
+        return textwrap.dedent(
+            f"""
+            {subject_lock}
+            Scene hint: {scene_text}. Preset: {preset_key}. Strength: {strength_pct}%.
+            {preset_text}
+            Only perform realistic photo retouching. Do not replace the main subject and do not redraw the image into a different composition.
+            Return only the final edited image.
+            """
+        ).strip().replace("\n", " ")
 
     async def _extract_image_base64(
         self,
         client: httpx.AsyncClient,
         response_data: dict[str, Any],
+        progress_callback: Callable[[int], None] | None = None,
     ) -> str | None:
         direct_b64 = response_data.get("b64_json")
         if isinstance(direct_b64, str) and direct_b64.strip():
+            self._emit_progress(progress_callback, 90)
             return direct_b64.strip()
         direct_url = response_data.get("url")
         if isinstance(direct_url, str) and direct_url.strip():
-            return await self._download_as_base64(client, direct_url.strip())
+            self._emit_progress(progress_callback, 84)
+            return await self._download_as_base64(
+                client,
+                direct_url.strip(),
+                progress_callback=progress_callback,
+            )
 
         data_items = response_data.get("data")
         if isinstance(data_items, list):
@@ -349,39 +430,63 @@ class DoubaoImageEditProvider:
                     continue
                 b64 = item.get("b64_json")
                 if isinstance(b64, str) and b64.strip():
+                    self._emit_progress(progress_callback, 90)
                     return b64.strip()
                 url = item.get("url")
                 if isinstance(url, str) and url.strip():
-                    return await self._download_as_base64(client, url.strip())
+                    self._emit_progress(progress_callback, 84)
+                    return await self._download_as_base64(
+                        client,
+                        url.strip(),
+                        progress_callback=progress_callback,
+                    )
 
         for _, value in response_data.items():
             if isinstance(value, dict):
                 nested_b64 = value.get("b64_json")
                 if isinstance(nested_b64, str) and nested_b64.strip():
+                    self._emit_progress(progress_callback, 90)
                     return nested_b64.strip()
                 nested_url = value.get("url")
                 if isinstance(nested_url, str) and nested_url.strip():
-                    return await self._download_as_base64(client, nested_url.strip())
+                    self._emit_progress(progress_callback, 84)
+                    return await self._download_as_base64(
+                        client,
+                        nested_url.strip(),
+                        progress_callback=progress_callback,
+                    )
             if isinstance(value, list):
                 for item in value:
                     if not isinstance(item, dict):
                         continue
                     nested_b64 = item.get("b64_json")
                     if isinstance(nested_b64, str) and nested_b64.strip():
+                        self._emit_progress(progress_callback, 90)
                         return nested_b64.strip()
                     nested_url = item.get("url")
                     if isinstance(nested_url, str) and nested_url.strip():
-                        return await self._download_as_base64(client, nested_url.strip())
+                        self._emit_progress(progress_callback, 84)
+                        return await self._download_as_base64(
+                            client,
+                            nested_url.strip(),
+                            progress_callback=progress_callback,
+                        )
 
         return None
 
-    async def _download_as_base64(self, client: httpx.AsyncClient, url: str) -> str:
+    async def _download_as_base64(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> str:
         parsed = urlparse(url)
         logger.info(
             "retouch.provider.download.start host=%s path=%s",
             parsed.netloc or "-",
             parsed.path[:120] or "/",
         )
+        self._emit_progress(progress_callback, 86)
         resp = await client.get(url)
         upstream_req = self._extract_upstream_request_id(resp)
         logger.info(
@@ -396,7 +501,16 @@ class DoubaoImageEditProvider:
             upstream_req,
             len(resp.content),
         )
+        self._emit_progress(progress_callback, 92)
         return encoded
+
+    def _emit_progress(self, progress_callback: Callable[[int], None] | None, progress: int) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(max(0, min(99, int(progress))))
+        except Exception:
+            logger.debug("retouch.provider.progress_callback failed", exc_info=True)
 
     def _extract_upstream_request_id(self, response: httpx.Response) -> str:
         for key in ("x-request-id", "x-tt-logid", "x-logid", "x-amzn-requestid", "trace-id"):
