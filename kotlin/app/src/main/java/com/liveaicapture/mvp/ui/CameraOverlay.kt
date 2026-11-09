@@ -32,26 +32,27 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
     val boxB by animateFloatAsState(state.bboxNorm?.bottom ?: -1f, animationSpec = animSpec, label = "boxB")
 
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val oneThirdX = size.width / 3f
-        val twoThirdX = size.width * 2f / 3f
-        val oneThirdY = size.height / 3f
-        val twoThirdY = size.height * 2f / 3f
+        val frame = fitCenterRect(size.width, size.height, state.sourceAspectRatio)
+        val oneThirdX = frame.left + frame.width / 3f
+        val twoThirdX = frame.left + frame.width * 2f / 3f
+        val oneThirdY = frame.top + frame.height / 3f
+        val twoThirdY = frame.top + frame.height * 2f / 3f
         val thirdLineAlpha = if (state.grid == "thirds") 0.58f else 0.30f
-        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(oneThirdX, 0f), Offset(oneThirdX, size.height), strokeWidth = 2f)
-        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(twoThirdX, 0f), Offset(twoThirdX, size.height), strokeWidth = 2f)
-        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(0f, oneThirdY), Offset(size.width, oneThirdY), strokeWidth = 2f)
-        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(0f, twoThirdY), Offset(size.width, twoThirdY), strokeWidth = 2f)
+        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(oneThirdX, frame.top), Offset(oneThirdX, frame.bottom), strokeWidth = 2f)
+        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(twoThirdX, frame.top), Offset(twoThirdX, frame.bottom), strokeWidth = 2f)
+        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(frame.left, oneThirdY), Offset(frame.right, oneThirdY), strokeWidth = 2f)
+        drawLine(Color.White.copy(alpha = thirdLineAlpha), Offset(frame.left, twoThirdY), Offset(frame.right, twoThirdY), strokeWidth = 2f)
 
         if (state.grid == "center") {
             val centerX = size.width / 2f
             val centerY = size.height / 2f
-            drawLine(Color.White.copy(alpha = 0.55f), Offset(centerX, 0f), Offset(centerX, size.height), strokeWidth = 2.4f)
-            drawLine(Color.White.copy(alpha = 0.55f), Offset(0f, centerY), Offset(size.width, centerY), strokeWidth = 2.4f)
+            drawLine(Color.White.copy(alpha = 0.55f), Offset(centerX, frame.top), Offset(centerX, frame.bottom), strokeWidth = 2.4f)
+            drawLine(Color.White.copy(alpha = 0.55f), Offset(frame.left, centerY), Offset(frame.right, centerY), strokeWidth = 2.4f)
         }
 
         if (abs(rollDegrees) >= 6f) {
             val center = Offset(size.width / 2f, size.height / 2f)
-            val length = size.width * 0.44f
+            val length = frame.width * 0.44f
             val radians = (-rollDegrees / 180f * PI).toFloat()
             val dx = cos(radians) * length / 2f
             val dy = sin(radians) * length / 2f
@@ -66,13 +67,14 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
         }
 
         if (targetX >= 0f && targetY >= 0f) {
-            // PreviewView uses FILL_CENTER; map normalized points through the cropped frame space.
+            // The encoder applies the shared viewport crop and rotation before normalization.
             val mappedPoint = mapNormPoint(
                 normX = targetX.coerceIn(0f, 1f),
                 normY = targetY.coerceIn(0f, 1f),
                 canvasWidth = size.width,
                 canvasHeight = size.height,
                 sourceAspectRatio = state.sourceAspectRatio,
+                sourceMirrored = state.sourceMirrored,
             )
             val px = mappedPoint.x
             val py = mappedPoint.y
@@ -88,6 +90,7 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
                 canvasWidth = size.width,
                 canvasHeight = size.height,
                 sourceAspectRatio = state.sourceAspectRatio,
+                sourceMirrored = state.sourceMirrored,
             )
             val targetPoint = mapNormPoint(
                 normX = targetX.coerceIn(0f, 1f),
@@ -95,6 +98,7 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
                 canvasWidth = size.width,
                 canvasHeight = size.height,
                 sourceAspectRatio = state.sourceAspectRatio,
+                sourceMirrored = state.sourceMirrored,
             )
             drawLine(
                 color = Color(0xFFFFD166),
@@ -132,6 +136,7 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
                 canvasWidth = size.width,
                 canvasHeight = size.height,
                 sourceAspectRatio = state.sourceAspectRatio,
+                sourceMirrored = state.sourceMirrored,
             )
             drawRect(
                 color = Color(0xFFFFC857),
@@ -143,11 +148,12 @@ fun CameraOverlay(state: OverlayState, rollDegrees: Float) {
     }
 }
 
-private fun mapRect(
+internal fun mapRect(
     normRect: Rect,
     canvasWidth: Float,
     canvasHeight: Float,
     sourceAspectRatio: Float,
+    sourceMirrored: Boolean = false,
 ): Rect {
     val lt = mapNormPoint(
         normX = normRect.left.coerceIn(0f, 1f),
@@ -155,6 +161,7 @@ private fun mapRect(
         canvasWidth = canvasWidth,
         canvasHeight = canvasHeight,
         sourceAspectRatio = sourceAspectRatio,
+        sourceMirrored = sourceMirrored,
     )
     val rb = mapNormPoint(
         normX = normRect.right.coerceIn(0f, 1f),
@@ -162,6 +169,7 @@ private fun mapRect(
         canvasWidth = canvasWidth,
         canvasHeight = canvasHeight,
         sourceAspectRatio = sourceAspectRatio,
+        sourceMirrored = sourceMirrored,
     )
     return Rect(
         left = minOf(lt.x, rb.x),
@@ -171,26 +179,24 @@ private fun mapRect(
     )
 }
 
-private fun mapNormPoint(
+internal fun mapNormPoint(
     normX: Float,
     normY: Float,
     canvasWidth: Float,
     canvasHeight: Float,
     sourceAspectRatio: Float,
+    sourceMirrored: Boolean = false,
 ): Offset {
-    val srcRatio = sourceAspectRatio.coerceAtLeast(0.01f)
-    val dstRatio = (canvasWidth / canvasHeight.coerceAtLeast(1f)).coerceAtLeast(0.01f)
-    return if (srcRatio > dstRatio) {
-        val scaledWidth = canvasHeight * srcRatio
-        val cropX = (scaledWidth - canvasWidth) / 2f
-        val x = normX * scaledWidth - cropX
-        val y = normY * canvasHeight
-        Offset(x, y)
-    } else {
-        val scaledHeight = canvasWidth / srcRatio
-        val cropY = (scaledHeight - canvasHeight) / 2f
-        val x = normX * canvasWidth
-        val y = normY * scaledHeight - cropY
-        Offset(x, y)
-    }
+    val frame = fitCenterRect(canvasWidth, canvasHeight, sourceAspectRatio)
+    val x = if (sourceMirrored) 1f - normX else normX
+    return Offset(frame.left + x * frame.width, frame.top + normY * frame.height)
+}
+
+private fun fitCenterRect(width: Float, height: Float, sourceAspectRatio: Float): Rect {
+    val ratio = sourceAspectRatio.coerceAtLeast(0.01f)
+    val frameWidth = minOf(width, height * ratio)
+    val frameHeight = frameWidth / ratio
+    val left = (width - frameWidth) / 2f
+    val top = (height - frameHeight) / 2f
+    return Rect(left, top, left + frameWidth, top + frameHeight)
 }

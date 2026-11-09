@@ -81,6 +81,7 @@ data class OverlayState(
     val bboxNorm: Rect? = null,
     val subjectCenterNorm: Offset? = null,
     val sourceAspectRatio: Float = 4f / 3f,
+    val sourceMirrored: Boolean = false,
 )
 
 data class CameraUiState(
@@ -280,6 +281,7 @@ data class CommunityUiState(
     val composedPreviewBase64: String? = null,
     val composeCompareInputBase64: String? = null,
     val composeStrength: Float = 0.45f,
+    val composeDialogVisible: Boolean = false,
     val composeJobId: Int? = null,
     val composeJobStatus: String = "",
     val composeJobProgress: Int = 0,
@@ -328,6 +330,7 @@ sealed interface AnalyzeEvent {
     data class Strategy(val grid: String, val targetPoint: Offset?) : AnalyzeEvent
     data class Target(val bbox: Rect?, val center: Offset?) : AnalyzeEvent
     data class Ui(val text: String, val level: String) : AnalyzeEvent
+    data class Error(val text: String) : AnalyzeEvent
     data class Param(val exposureCompensation: Int) : AnalyzeEvent
     data object Done : AnalyzeEvent
 }

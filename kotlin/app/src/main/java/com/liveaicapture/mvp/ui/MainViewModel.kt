@@ -62,6 +62,9 @@ import kotlin.math.min
 import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -147,8 +150,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var communityFeedOffset = 0
     private var composeJobPolling: Job? = null
     private var cocreateJobPolling: Job? = null
+    @Volatile private var sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+    @Volatile private var sessionGeneration = 0L
+    private var photoGeneration = 0L
+    private var retouchJob: Job? = null
 
-    private var bearerToken: String = ""
+    @Volatile private var bearerToken: String = ""
 
     init {
         observeSettings()
@@ -169,7 +176,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun bootstrapSession() {
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             _authUiState.update { it.copy(checkingSession = true, errorMessage = null) }
 
             val session = sessionRepository.readSession()
@@ -241,7 +248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun login(email: String, password: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             logClientInfo("auth.login", "start email=$email")
             _authUiState.update { it.copy(loading = true, errorMessage = null) }
             try {
@@ -280,7 +287,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun register(email: String, password: String, nickname: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             logClientInfo("auth.register", "start email=$email")
             _authUiState.update { it.copy(loading = true, errorMessage = null) }
             try {
@@ -320,43 +327,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun logout() {
+        val token = bearerToken
+        val serverUrl = _uiState.value.settings.serverUrl
+        sessionGeneration++
+        sessionJob.cancel()
+        bearerToken = ""
+        _authUiState.value = AuthUiState(checkingSession = false)
+        resetFlowAfterLogout()
+        sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
         viewModelScope.launch {
-            logClientInfo("auth.logout", "start")
-            val token = bearerToken
-            val serverUrl = _uiState.value.settings.serverUrl
-
-            // 本地会话先立即清理，确保“退出登录”按钮可即时响应。
             sessionRepository.clearSession()
-            bearerToken = ""
-            syncCommunityAuthHeader()
-            _authUiState.value = AuthUiState(
-                checkingSession = false,
-                authenticated = false,
-                loading = false,
-                user = null,
-                errorMessage = null,
-            )
-            resetFlowAfterLogout()
             logClientInfo("auth.logout", "local_session_cleared")
-
-            // 服务端会话回收采用异步 best-effort，避免弱网下阻塞 UI。
             if (token.isNotBlank()) {
-                viewModelScope.launch {
-                    val remoteOk = withTimeoutOrNull(3500L) {
-                        try {
-                            authApiClient.logout(serverUrl, token)
-                            true
-                        } catch (e: Exception) {
-                            logClientError(
-                                scope = "auth.logout.remote",
-                                throwable = e,
-                                userHint = "登出接口调用失败",
-                            )
-                            false
-                        }
-                    } ?: false
-                    logClientInfo("auth.logout", "remote_revoke=$remoteOk")
-                }
+                val remoteOk = withTimeoutOrNull(3500L) {
+                    try {
+                        authApiClient.logout(serverUrl, token)
+                        true
+                    } catch (e: Exception) {
+                        logClientError(
+                            scope = "auth.logout.remote",
+                            throwable = e,
+                            userHint = "登出接口调用失败",
+                        )
+                        false
+                    }
+                } ?: false
+                logClientInfo("auth.logout", "remote_revoke=$remoteOk")
             }
         }
     }
@@ -366,6 +362,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun resetFlowAfterLogout() {
+        photoGeneration++
+        retouchJob = null
+        currentAnalyzeJob = null
+        synchronized(frameLock) { latestFrameJpeg = null }
+        synchronized(requestGate) {
+            analyzeInFlight = false
+            sceneDetectInFlight = false
+        }
         composeJobPolling?.cancel()
         composeJobPolling = null
         cocreateJobPolling?.cancel()
@@ -384,6 +388,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 aiEnabled = true,
+                analyzingTips = false,
+                lastPhotoUri = null,
                 tipText = "点击 AI分析 获取构图建议",
                 statusText = "请登录后开始拍摄",
                 showPostCaptureChoice = false,
@@ -411,7 +417,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun persistProfile(user: AuthUser) {
         _authUiState.update { it.copy(user = user, errorMessage = null) }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             sessionRepository.updateProfile(user)
         }
     }
@@ -441,14 +447,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onFrame(imageProxy: ImageProxy, lensFacing: String = "back") {
+        val frameGeneration = sessionGeneration
         val snapshot = _uiState.value
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val now = System.currentTimeMillis()
         latestLensFacing = if (lensFacing == "front") "front" else "back"
 
         val frameAspectRatio = computeRotatedAspectRatio(
-            width = imageProxy.width,
-            height = imageProxy.height,
+            width = imageProxy.cropRect.width(),
+            height = imageProxy.cropRect.height(),
             rotationDegrees = rotationDegrees,
         )
 
@@ -457,13 +464,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val shouldPublishStability = (
             now - lastUiStabilityUpdateAtMs >= UI_STABILITY_PUBLISH_INTERVAL_MS ||
                 abs(frameAspectRatio - lastPublishedAspectRatio) >= 0.01f ||
+                (lensFacing == "front") != snapshot.overlay.sourceMirrored ||
                 isStable != lastPublishedStable ||
                 abs(stabilityScore - lastPublishedStabilityScore) >= 0.08f
             )
         if (shouldPublishStability) {
             _uiState.update {
                 it.copy(
-                    overlay = it.overlay.copy(sourceAspectRatio = frameAspectRatio),
+                    overlay = it.overlay.copy(
+                        sourceAspectRatio = frameAspectRatio,
+                        sourceMirrored = lensFacing == "front",
+                    ),
                     frameStable = isStable,
                     stabilityScore = stabilityScore,
                 )
@@ -475,7 +486,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (!snapshot.aiEnabled) {
-            imageProxy.close()
             return
         }
 
@@ -500,7 +510,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val shouldRefreshAnalyzeFrame = isStable && (now - lastStableFrameAtMs >= 1200L)
         val shouldEncodeFrame = canClassifyNow || shouldRefreshAnalyzeFrame || latestFrameJpeg == null
         if (!shouldEncodeFrame) {
-            imageProxy.close()
             return
         }
 
@@ -513,10 +522,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 userHint = "帧编码失败",
             )
             _uiState.update { it.copy(statusText = "帧编码失败") }
-            imageProxy.close()
             return
         }
-        imageProxy.close()
 
         if (shouldRefreshAnalyzeFrame || now - latestFrameCapturedAtMs > 2000L) {
             synchronized(frameLock) {
@@ -539,17 +546,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val mode = snapshot.settings.captureMode
         val sceneHint = _uiState.value.detectedScene.raw
         val requestBytes = jpegBytes.copyOf()
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
+            if (frameGeneration != sessionGeneration) return@launch
             try {
                 val classified = sceneApiClient.detect(
                     serverUrl = serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     imageBase64 = Base64.encodeToString(requestBytes, Base64.NO_WRAP),
                     rotationDegrees = rotationDegrees,
                     lensFacing = latestLensFacing,
                     captureMode = mode.raw,
                     sceneHint = sceneHint,
                 )
+                if (frameGeneration != sessionGeneration) return@launch
                 applySceneDetectResult(classified)
                 _uiState.update { it.copy(sessionFrameCount = it.sessionFrameCount + 1) }
             } catch (e: Exception) {
@@ -559,7 +569,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     userHint = "场景识别失败",
                 )
             } finally {
-                releaseSceneDetect()
+                if (frameGeneration == sessionGeneration) releaseSceneDetect()
             }
         }
     }
@@ -621,7 +631,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val previousTipText = lastSuccessfulTipText
         val recentTipTexts = recentSuccessfulTips.toList()
         currentAnalyzeJob?.cancel()
-        currentAnalyzeJob = viewModelScope.launch {
+        currentAnalyzeJob = viewModelScope.launch(sessionJob) {
+            val requestGeneration = sessionGeneration
             val now = System.currentTimeMillis()
             var finalStatus = statusByProvider(_uiState.value.settings.guideProvider, _uiState.value.aiEnabled)
             try {
@@ -652,14 +663,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 finalStatus = "分析失败，请重试"
             } finally {
-                releaseAnalyzeRequest()
-                _uiState.update {
-                    it.copy(
-                        analyzingTips = false,
-                        statusText = finalStatus,
-                    )
+                if (requestGeneration == sessionGeneration) {
+                    releaseAnalyzeRequest()
+                    _uiState.update {
+                        it.copy(
+                            analyzingTips = false,
+                            statusText = finalStatus,
+                        )
+                    }
+                    logClientInfo("analyze.request", "finished status=$finalStatus")
                 }
-                logClientInfo("analyze.request", "finished status=$finalStatus")
             }
         }
     }
@@ -676,11 +689,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): String {
         val imageBase64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
         val overlaySnapshot = _uiState.value.overlay
+        val requestToken = bearerToken
+        val requestGeneration = sessionGeneration
+        val requestJob = currentCoroutineContext()[Job]
         try {
             var receivedUiEvent = false
+            var analysisError: String? = null
             analyzeApiClient.analyze(
                 serverUrl = settings.serverUrl,
-                bearerToken = bearerToken,
+                bearerToken = requestToken,
                 imageBase64 = imageBase64,
                 rotationDegrees = rotationDegrees,
                 lensFacing = latestLensFacing,
@@ -694,6 +711,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 frameStable = stable,
                 stabilityScore = stabilityScore,
                 onRawLine = { line ->
+                    requestJob?.ensureActive()
+                    if (requestGeneration != sessionGeneration) throw CancellationException("Session changed")
                     if (settings.debugEnabled) {
                         _uiState.update { state ->
                             val merged = listOf(state.debugRaw, line).filter { it.isNotBlank() }
@@ -704,12 +723,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 },
                 onEvent = { event ->
+                    requestJob?.ensureActive()
+                    if (requestGeneration != sessionGeneration) throw CancellationException("Session changed")
                     if (event is AnalyzeEvent.Ui) {
                         receivedUiEvent = true
                     }
+                    if (event is AnalyzeEvent.Error) analysisError = event.text
                     applyEvent(event)
                 },
             )
+            analysisError?.let { return it }
             if (!receivedUiEvent) {
                 logClientError(
                     scope = "analyze.cloud.no_ui",
@@ -868,6 +891,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
+            is AnalyzeEvent.Error -> {
+                _uiState.update { it.copy(tipText = event.text, tipLevel = "warn", statusText = event.text) }
+                if (event.text.contains("限流") || event.text.contains("冷却")) {
+                    nextAnalyzeAllowedAtMs = max(nextAnalyzeAllowedAtMs, System.currentTimeMillis() + 10_000L)
+                }
+            }
+
             is AnalyzeEvent.Param -> {
                 currentExposureCompensation = event.exposureCompensation
                 _uiState.update {
@@ -875,16 +905,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            AnalyzeEvent.Done -> {
-                _uiState.update {
-                    it.copy(
-                        statusText = statusByProvider(
-                            provider = it.settings.guideProvider,
-                            aiEnabled = it.aiEnabled,
-                        ),
-                    )
-                }
-            }
+            AnalyzeEvent.Done -> Unit
         }
     }
 
@@ -1091,6 +1112,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onPhotoCaptured(savedUri: String?) {
+        retouchJob?.cancel()
+        photoGeneration++
         logClientInfo("photo.capture", "savedUri=${savedUri ?: "null"}")
         _uiState.update {
             it.copy(
@@ -1112,6 +1135,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onGalleryPhotoSelected(uri: String?) {
         if (uri.isNullOrBlank()) return
+        retouchJob?.cancel()
+        photoGeneration++
         logClientInfo("photo.gallery", "selectedUri=$uri")
         _uiState.update {
             it.copy(
@@ -1169,7 +1194,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        viewModelScope.launch {
+        val requestPhoto = photoGeneration
+        retouchJob?.cancel()
+        retouchJob = viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             logClientInfo("retouch.apply", "start mode=${current.mode.raw} preset=${current.preset.raw}")
             _retouchUiState.update { it.copy(applying = true, requestId = "", errorMessage = null) }
             try {
@@ -1179,13 +1207,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val customPrompt = if (current.mode == RetouchMode.CUSTOM) current.customPrompt.trim() else null
                 val result = retouchApiClient.retouch(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     imageBase64 = imageBase64,
                     preset = current.preset.raw,
                     strength = current.strength,
                     sceneHint = current.sceneHint.raw,
                     customPrompt = customPrompt,
                 )
+                if (requestPhoto != photoGeneration) return@launch
                 if (result.imageBase64.isBlank()) {
                     throw IllegalStateException("empty retouched image")
                 }
@@ -1203,6 +1232,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 logClientInfo("retouch.apply", "success model=${result.model} req=${result.requestId}")
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (requestPhoto != photoGeneration) return@launch
                 logClientError(
                     scope = "retouch.apply",
                     throwable = e,
@@ -1330,13 +1361,14 @@ fun continueWithRetouchedPhoto() {
             return
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             logClientInfo("feedback.submit", "start rating=${current.rating} retouch=${current.isRetouched}")
             _feedbackUiState.update { it.copy(submitting = true, errorMessage = null) }
             try {
                 val feedbackId = feedbackApiClient.submit(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     rating = current.rating,
                     scene = current.scene.raw,
                     tipText = current.tipText,
@@ -1364,7 +1396,7 @@ fun continueWithRetouchedPhoto() {
                         ?: throw IllegalStateException("未找到可发布图片")
                     val post = communityApiClient.publishPost(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         feedbackId = feedbackId,
                         imageBase64 = imageBase64,
                         placeTag = current.publishPlaceTag.trim(),
@@ -1550,7 +1582,8 @@ fun continueWithRetouchedPhoto() {
         }
         if (state.publishingDirect) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update { it.copy(publishingDirect = true, errorMessage = null) }
             try {
                 val imageBase64 = encodePhotoUriToBase64(state.publishImageUri)
@@ -1560,7 +1593,7 @@ fun continueWithRetouchedPhoto() {
                 val post = if (state.publishPostType == "relay" && (state.publishRelayParentPostId ?: 0) > 0) {
                     communityApiClient.publishRelayPost(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         imageBase64 = imageBase64,
                         placeTag = publishPlaceTag,
                         sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
@@ -1573,7 +1606,7 @@ fun continueWithRetouchedPhoto() {
                 } else {
                     communityApiClient.publishDirectPost(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         imageBase64 = imageBase64,
                         placeTag = publishPlaceTag,
                         sceneType = state.publishSceneType.takeIf { it.isNotBlank() },
@@ -1639,12 +1672,13 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(loadingFeed = true, errorMessage = null) }
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val currentFeed = if (reset) emptyList() else _communityUiState.value.feed
                 val result = communityApiClient.fetchFeed(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     offset = communityFeedOffset,
                     limit = 20,
                 )
@@ -1705,11 +1739,12 @@ fun continueWithRetouchedPhoto() {
         // 姿势（pose）维度留到后续版本，不在本次请求参数内。
         val snapshot = _communityUiState.value
         _communityUiState.update { it.copy(loadingRecommendations = true, errorMessage = null) }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val items = communityApiClient.fetchRecommendations(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     placeTag = snapshot.recommendationPlaceTag,
                     sceneType = snapshot.recommendationSceneType,
                     limit = 12,
@@ -1754,18 +1789,19 @@ fun continueWithRetouchedPhoto() {
         _communityUiState.update {
             it.copy(likingPostIds = it.likingPostIds + postId, errorMessage = null)
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val liked = if (post.likedByMe) {
                     communityApiClient.unlikePost(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         postId = postId,
                     )
                 } else {
                     communityApiClient.likePost(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         postId = postId,
                     )
                 }
@@ -1820,11 +1856,12 @@ fun continueWithRetouchedPhoto() {
             return
         }
         _communityUiState.update { it.copy(loadingCommentsPostId = postId, errorMessage = null) }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val comments = communityApiClient.fetchComments(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     postId = postId,
                 ).map { it.toCommunityComment() }
                 _communityUiState.update {
@@ -1860,11 +1897,12 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "请输入评论内容") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val comment = communityApiClient.addComment(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     postId = postId,
                     text = text,
                 ).toCommunityComment()
@@ -1901,11 +1939,12 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "请先登录") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 communityApiClient.deleteComment(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     commentId = commentId,
                 )
                 _communityUiState.update { state ->
@@ -1953,11 +1992,12 @@ fun continueWithRetouchedPhoto() {
                 errorMessage = null,
             )
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 communityApiClient.deletePost(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     postId = postId,
                 )
                 _communityUiState.update { state ->
@@ -1995,11 +2035,12 @@ fun continueWithRetouchedPhoto() {
                 errorMessage = null,
             )
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val guide = communityApiClient.fetchRemakeGuide(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     templatePostId = templatePostId,
                 ).toCommunityRemakeGuide(_uiState.value.settings.serverUrl)
                 _communityUiState.update {
@@ -2077,7 +2118,8 @@ fun continueWithRetouchedPhoto() {
         }
         if (state.remakeAnalyzing) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update {
                 it.copy(
                     remakeAnalyzing = true,
@@ -2089,7 +2131,7 @@ fun continueWithRetouchedPhoto() {
                 val candidateBase64 = encodePhotoUriToBase64(latestPhotoUri)
                 val result = communityApiClient.analyzeRemake(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     templatePostId = guide.templatePost.id,
                     candidateImageBase64 = candidateBase64,
                 ).toCommunityRemakeAnalysis()
@@ -2127,27 +2169,25 @@ fun continueWithRetouchedPhoto() {
     fun clearComposedPreview() {
         composeJobPolling?.cancel()
         composeJobPolling = null
-        _communityUiState.update {
-            it.copy(
-                composedPreviewBase64 = null,
-                composeCompareInputBase64 = null,
-                composeJobId = null,
-                composeJobStatus = "",
-                composeJobProgress = 0,
-                composeJobPriority = 100,
-                composeRetryCount = 0,
-                composeMaxRetries = 0,
-                composeNextRetryAt = null,
-                composeStartedAt = null,
-                composeHeartbeatAt = null,
-                composeLeaseExpiresAt = null,
-                composeCancelReason = "",
-                composeImplementationStatus = "ready",
-                composePlaceholderNotes = emptyList(),
-                composeErrorMessage = "",
-                composeRequestId = "",
-                errorMessage = null,
-            )
+        _communityUiState.update { it.copy(composeDialogVisible = false, composing = false) }
+    }
+
+    fun resumeCreativeJobs() {
+        if (!_authUiState.value.authenticated || bearerToken.isBlank()) return
+        val state = _communityUiState.value
+        state.composeJobId?.takeIf {
+            (state.composeJobStatus == "queued" || state.composeJobStatus == "running") && composeJobPolling?.isActive != true
+        }?.let { jobId ->
+            _communityUiState.update {
+                it.copy(composing = true, composeDialogVisible = true, composeErrorMessage = "", errorMessage = null)
+            }
+            launchComposeJobPolling(jobId)
+        }
+        state.cocreateJobId?.takeIf {
+            (state.cocreateJobStatus == "queued" || state.cocreateJobStatus == "running") && cocreateJobPolling?.isActive != true
+        }?.let { jobId ->
+            _communityUiState.update { it.copy(cocreating = true, cocreateErrorMessage = "", errorMessage = null) }
+            launchCocreateJobPolling(jobId)
         }
     }
 
@@ -2155,6 +2195,10 @@ fun continueWithRetouchedPhoto() {
         val state = _communityUiState.value
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (state.composeJobId != null && (state.composeJobStatus == "queued" || state.composeJobStatus == "running")) {
+            resumeCreativeJobs()
             return
         }
         val referenceId = state.referencePostId
@@ -2169,10 +2213,12 @@ fun continueWithRetouchedPhoto() {
         }
         if (state.composing) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update {
                 it.copy(
                     composing = true,
+                    composeDialogVisible = true,
                     composedPreviewBase64 = null,
                     composeCompareInputBase64 = null,
                     composeJobId = null,
@@ -2197,7 +2243,7 @@ fun continueWithRetouchedPhoto() {
                 val personBase64 = encodePhotoUriToBase64(personUri)
                 val job = communityApiClient.createComposeJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     referencePostId = referenceId,
                     personImageBase64 = personBase64,
                     strength = COMMUNITY_AUTO_COMPOSE_STRENGTH,
@@ -2247,7 +2293,8 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "当前没有可重试的融合任务") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update {
                 it.copy(
                     composing = true,
@@ -2265,7 +2312,7 @@ fun continueWithRetouchedPhoto() {
             try {
                 val retried = communityApiClient.retryCreativeJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     jobId = jobId,
                 )
                 _communityUiState.update { current ->
@@ -2294,8 +2341,10 @@ fun continueWithRetouchedPhoto() {
                     it.copy(
                         composing = false,
                         composeJobStatus = "failed",
-                        composeErrorMessage = "重试失败",
-                        errorMessage = "AI 融合重试失败，请稍后再试",
+                        composeErrorMessage = if (e.message.orEmpty().contains("request_image_expired")) {
+                            "原图已过期，请重新选择人物照片"
+                        } else "重试失败，请稍后再试",
+                        errorMessage = null,
                     )
                 }
             }
@@ -2312,18 +2361,19 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "当前没有可取消的融合任务") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val canceled = communityApiClient.cancelCreativeJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     jobId = jobId,
                 )
                 composeJobPolling?.cancel()
                 composeJobPolling = null
                 _communityUiState.update { current ->
                     current.copy(
-                        composing = false,
+                        composing = canceled.status == "queued" || canceled.status == "running",
                         composeJobStatus = canceled.status,
                         composeJobProgress = canceled.progress.coerceIn(0, 100),
                         composeJobPriority = canceled.priority.coerceIn(1, 999),
@@ -2334,10 +2384,11 @@ fun continueWithRetouchedPhoto() {
                         composeHeartbeatAt = canceled.heartbeatAt,
                         composeLeaseExpiresAt = canceled.leaseExpiresAt,
                         composeCancelReason = canceled.cancelReason,
-                        composeErrorMessage = "任务已取消",
-                        errorMessage = "已取消融合任务",
+                        composeErrorMessage = if (canceled.status == "canceled") "任务已取消" else "正在取消任务",
+                        errorMessage = null,
                     )
                 }
+                if (canceled.status == "queued" || canceled.status == "running") launchComposeJobPolling(jobId)
             } catch (e: Exception) {
                 logClientError(
                     scope = "community.compose.cancel",
@@ -2357,7 +2408,7 @@ fun continueWithRetouchedPhoto() {
             onSaved(null)
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             val uri = try {
                 saveBase64ToGallery(preview, "CamMate_CommunityCompose")
             } catch (e: Exception) {
@@ -2383,34 +2434,17 @@ fun continueWithRetouchedPhoto() {
     fun clearCocreatePreview() {
         cocreateJobPolling?.cancel()
         cocreateJobPolling = null
-        _communityUiState.update {
-            it.copy(
-                cocreatePreviewBase64 = null,
-                cocreateCompareInputBase64 = null,
-                cocreateJobId = null,
-                cocreateJobStatus = "",
-                cocreateJobProgress = 0,
-                cocreateJobPriority = 100,
-                cocreateRetryCount = 0,
-                cocreateMaxRetries = 0,
-                cocreateNextRetryAt = null,
-                cocreateStartedAt = null,
-                cocreateHeartbeatAt = null,
-                cocreateLeaseExpiresAt = null,
-                cocreateCancelReason = "",
-                cocreateImplementationStatus = "ready",
-                cocreatePlaceholderNotes = emptyList(),
-                cocreateErrorMessage = "",
-                cocreateRequestId = "",
-                errorMessage = null,
-            )
-        }
+        _communityUiState.update { it.copy(cocreating = false) }
     }
 
     fun composeCocreateImage() {
         val state = _communityUiState.value
         if (!_authUiState.value.authenticated || bearerToken.isBlank()) {
             _communityUiState.update { it.copy(errorMessage = "请先登录") }
+            return
+        }
+        if (state.cocreateJobId != null && (state.cocreateJobStatus == "queued" || state.cocreateJobStatus == "running")) {
+            resumeCreativeJobs()
             return
         }
         val referenceId = state.referencePostId
@@ -2426,7 +2460,8 @@ fun continueWithRetouchedPhoto() {
             return
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update {
                 it.copy(
                     cocreating = true,
@@ -2455,7 +2490,7 @@ fun continueWithRetouchedPhoto() {
                 val personBBase64 = encodePhotoUriToBase64(personB)
                 val job = communityApiClient.createCocreateJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     referencePostId = referenceId,
                     personAImageBase64 = personABase64,
                     personBImageBase64 = personBBase64,
@@ -2506,7 +2541,8 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "当前没有可重试的共创任务") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             _communityUiState.update {
                 it.copy(
                     cocreating = true,
@@ -2524,7 +2560,7 @@ fun continueWithRetouchedPhoto() {
             try {
                 val retried = communityApiClient.retryCreativeJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     jobId = jobId,
                 )
                 _communityUiState.update { current ->
@@ -2553,8 +2589,10 @@ fun continueWithRetouchedPhoto() {
                     it.copy(
                         cocreating = false,
                         cocreateJobStatus = "failed",
-                        cocreateErrorMessage = "重试失败",
-                        errorMessage = "双人共创重试失败，请稍后再试",
+                        cocreateErrorMessage = if (e.message.orEmpty().contains("request_image_expired")) {
+                            "原图已过期，请重新选择人物照片"
+                        } else "重试失败，请稍后再试",
+                        errorMessage = null,
                     )
                 }
             }
@@ -2571,18 +2609,19 @@ fun continueWithRetouchedPhoto() {
             _communityUiState.update { it.copy(errorMessage = "当前没有可取消的共创任务") }
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             try {
                 val canceled = communityApiClient.cancelCreativeJob(
                     serverUrl = _uiState.value.settings.serverUrl,
-                    bearerToken = bearerToken,
+                    bearerToken = requestToken,
                     jobId = jobId,
                 )
                 cocreateJobPolling?.cancel()
                 cocreateJobPolling = null
                 _communityUiState.update { current ->
                     current.copy(
-                        cocreating = false,
+                        cocreating = canceled.status == "queued" || canceled.status == "running",
                         cocreateJobStatus = canceled.status,
                         cocreateJobProgress = canceled.progress.coerceIn(0, 100),
                         cocreateJobPriority = canceled.priority.coerceIn(1, 999),
@@ -2593,10 +2632,11 @@ fun continueWithRetouchedPhoto() {
                         cocreateHeartbeatAt = canceled.heartbeatAt,
                         cocreateLeaseExpiresAt = canceled.leaseExpiresAt,
                         cocreateCancelReason = canceled.cancelReason,
-                        cocreateErrorMessage = "任务已取消",
-                        errorMessage = "已取消共创任务",
+                        cocreateErrorMessage = if (canceled.status == "canceled") "任务已取消" else "正在取消任务",
+                        errorMessage = null,
                     )
                 }
+                if (canceled.status == "queued" || canceled.status == "running") launchCocreateJobPolling(jobId)
             } catch (e: Exception) {
                 logClientError(
                     scope = "community.cocreate.cancel",
@@ -2612,12 +2652,13 @@ fun continueWithRetouchedPhoto() {
 
     private fun launchComposeJobPolling(jobId: Int) {
         composeJobPolling?.cancel()
-        composeJobPolling = viewModelScope.launch {
+        composeJobPolling = viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             while (true) {
                 val job = try {
                     communityApiClient.getCreativeJob(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         jobId = jobId,
                     )
                 } catch (ce: CancellationException) {
@@ -2631,8 +2672,7 @@ fun continueWithRetouchedPhoto() {
                     _communityUiState.update {
                         it.copy(
                             composing = false,
-                            composeJobStatus = "failed",
-                            composeErrorMessage = "任务状态查询失败",
+                            composeErrorMessage = "任务查询失败，请继续查询",
                             errorMessage = "AI 融合任务状态获取失败，请稍后重试",
                         )
                     }
@@ -2713,12 +2753,13 @@ fun continueWithRetouchedPhoto() {
 
     private fun launchCocreateJobPolling(jobId: Int) {
         cocreateJobPolling?.cancel()
-        cocreateJobPolling = viewModelScope.launch {
+        cocreateJobPolling = viewModelScope.launch(sessionJob) {
+            val requestToken = bearerToken
             while (true) {
                 val job = try {
                     communityApiClient.getCreativeJob(
                         serverUrl = _uiState.value.settings.serverUrl,
-                        bearerToken = bearerToken,
+                        bearerToken = requestToken,
                         jobId = jobId,
                     )
                 } catch (ce: CancellationException) {
@@ -2732,8 +2773,7 @@ fun continueWithRetouchedPhoto() {
                     _communityUiState.update {
                         it.copy(
                             cocreating = false,
-                            cocreateJobStatus = "failed",
-                            cocreateErrorMessage = "任务状态查询失败",
+                            cocreateErrorMessage = "任务查询失败，请继续查询",
                             errorMessage = "双人共创任务状态获取失败，请稍后重试",
                         )
                     }
@@ -2818,7 +2858,7 @@ fun continueWithRetouchedPhoto() {
             onSaved(null)
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(sessionJob) {
             val uri = try {
                 saveBase64ToGallery(preview, "CamMate_Cocreate")
             } catch (e: Exception) {
@@ -3052,6 +3092,7 @@ fun continueWithRetouchedPhoto() {
     }
 
     private fun logClientError(scope: String, throwable: Throwable?, userHint: String) {
+        if (throwable is CancellationException) throw throwable
         val rawMessage = throwable?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "no throwable"
         if (throwable != null) {
             appLogger.e(TAG, "[$scope] $userHint | $rawMessage", throwable)

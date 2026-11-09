@@ -33,7 +33,9 @@ object FrameEncoder {
         val rawBitmap = BitmapFactory.decodeByteArray(yuvToJpeg.toByteArray(), 0, yuvToJpeg.size())
             ?: throw IllegalStateException("Failed to decode JPEG from YUV")
 
-        val rotatedBitmap = rotateBitmap(rawBitmap, imageProxy.imageInfo.rotationDegrees)
+        val crop = imageProxy.cropRect
+        val croppedBitmap = Bitmap.createBitmap(rawBitmap, crop.left, crop.top, crop.width(), crop.height())
+        val rotatedBitmap = rotateBitmap(croppedBitmap, imageProxy.imageInfo.rotationDegrees)
         val resizedBitmap = resizeLongEdge(rotatedBitmap, 1024)
 
         val finalJpeg = ByteArrayOutputStream()

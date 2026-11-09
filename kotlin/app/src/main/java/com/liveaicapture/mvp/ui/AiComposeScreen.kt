@@ -91,6 +91,7 @@ fun AiComposeScreen(
 
     LaunchedEffect(authState.authenticated) {
         if (!authState.authenticated) return@LaunchedEffect
+        viewModel.resumeCreativeJobs()
         viewModel.refreshRecommendations()
         if (state.feed.isEmpty()) {
             viewModel.refreshCommunityFeed(reset = true)
@@ -112,12 +113,8 @@ fun AiComposeScreen(
         state.recommendations.firstOrNull { it.post.id == selectedId }?.post
             ?: state.feed.firstOrNull { it.id == selectedId }
     }
-    val showComposeDialog = state.composing ||
-        state.composeJobStatus == "queued" ||
-        state.composeJobStatus == "running" ||
-        state.composeJobStatus == "failed" ||
-        !state.composedPreviewBase64.isNullOrBlank()
-    val isGenerating = state.composing || state.composeJobStatus == "queued" || state.composeJobStatus == "running"
+    val showComposeDialog = state.composeDialogVisible
+    val isGenerating = state.composing
 
     BackHandler(enabled = showComposeDialog && !isGenerating) {
         viewModel.clearComposedPreview()
@@ -255,6 +252,13 @@ fun AiComposeScreen(
             progress = state.composeJobProgress.coerceIn(0, 100) / 100f,
             isGenerating = isGenerating,
             errorMessage = state.composeErrorMessage.takeIf { it.isNotBlank() },
+            isPlaceholder = state.composeImplementationStatus == "placeholder",
+            retryLabel = if (state.composeJobStatus == "failed") "重试生成" else "继续查询",
+            onRetry = if (state.composeJobId == null) null else when (state.composeJobStatus) {
+                "queued", "running" -> viewModel::resumeCreativeJobs
+                "failed" -> viewModel::retryComposeJob
+                else -> null
+            },
             onSave = {
                 viewModel.saveComposedPreviewToGallery { uri ->
                     if (uri.isNullOrBlank()) {
@@ -550,6 +554,9 @@ private fun ComposeProgressDialog(
     progress: Float,
     isGenerating: Boolean,
     errorMessage: String?,
+    isPlaceholder: Boolean,
+    retryLabel: String,
+    onRetry: (() -> Unit)?,
     onSave: () -> Unit,
     onReturn: () -> Unit,
 ) {
@@ -582,6 +589,10 @@ private fun ComposeProgressDialog(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (isPlaceholder && !previewBase64.isNullOrBlank()) {
+                    Text("本地融合预览，未使用云端 AI", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
 
                 LinearProgressIndicator(
                     progress = { if (!previewBase64.isNullOrBlank()) 1f else progress.coerceIn(0f, 1f) },
@@ -649,6 +660,15 @@ private fun ComposeProgressDialog(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        if (previewBase64.isNullOrBlank() && onRetry != null) {
+                            Button(
+                                onClick = onRetry,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(14.dp),
+                            ) {
+                                SingleLineButtonText(retryLabel)
+                            }
+                        }
                         if (!previewBase64.isNullOrBlank()) {
                             Button(
                                 onClick = onSave,

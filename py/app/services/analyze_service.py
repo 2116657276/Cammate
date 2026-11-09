@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import time
 import uuid
 from typing import Any
-
-from fastapi import HTTPException
 
 from app.models.schemas import AnalyzeRequest
 from providers.factory import get_provider
@@ -18,16 +15,6 @@ from scene_detector import get_scene_detector
 logger = logging.getLogger("uvicorn.error")
 
 
-def validate_image_base64(image_base64: str) -> bytes:
-    try:
-        raw = base64.b64decode(image_base64, validate=True)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="invalid image_base64") from exc
-    if len(raw) == 0:
-        raise HTTPException(status_code=400, detail="empty image")
-    if len(raw) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="image too large")
-    return raw
 
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -79,10 +66,19 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
-async def event_stream(req: AnalyzeRequest):
+async def event_stream(req: AnalyzeRequest, raw_bytes: bytes):
+    try:
+        async for line in _event_stream(req, raw_bytes):
+            yield line
+    except Exception:
+        logger.exception("analyze.stream_failed")
+        yield json.dumps({"type": "error", "text": "图像分析失败，请重试"}, ensure_ascii=False) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+
+async def _event_stream(req: AnalyzeRequest, raw_bytes: bytes):
     start_ts = time.perf_counter()
     request_id = uuid.uuid4().hex[:8]
-    raw_bytes = validate_image_base64(req.image_base64)
     detector = get_scene_detector()
     provider = get_provider()
     provider_timeout_sec = _read_timeout_sec()
@@ -166,9 +162,8 @@ async def event_stream(req: AnalyzeRequest):
             text = "云端分析失败，请重试"
         events = [
             {
-                "type": "ui",
+                "type": "error",
                 "text": text,
-                "level": "warn",
             },
             {"type": "done"},
         ]

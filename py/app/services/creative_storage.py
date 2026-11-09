@@ -82,19 +82,27 @@ class CreativeObjectStorage:
             client = self._s3_client()
             bucket = SETTINGS.creative_storage_bucket
             self._ensure_bucket(client, bucket)
-            client.put_object(
-                Bucket=bucket,
-                Key=storage_key,
-                Body=raw,
-                ContentType=mime_type,
-            )
+            try:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=storage_key,
+                    Body=raw,
+                    ContentType=mime_type,
+                )
+            except Exception:
+                self.delete_object(provider, storage_key)
+                raise
         else:
             path = (SETTINGS.community_creative_result_dir / storage_key).resolve()
             base_dir = SETTINGS.community_creative_result_dir.resolve()
             if base_dir not in path.parents:
                 raise RuntimeError("invalid local storage path")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
+            try:
+                path.write_bytes(raw)
+            except Exception:
+                self.delete_object(provider, storage_key)
+                raise
 
         return StoredObject(
             provider=provider,

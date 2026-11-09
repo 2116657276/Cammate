@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from app.api.deps import require_user
 from app.models.schemas import AnalyzeRequest, AuthUser
 from app.services.analyze_service import event_stream
+from app.services.image_validation import validate_image_base64
 
 router = APIRouter(tags=["analyze"])
 
@@ -15,4 +16,5 @@ async def analyze(
     req: AnalyzeRequest,
     _: AuthUser = Depends(require_user),
 ) -> StreamingResponse:
-    return StreamingResponse(event_stream(req), media_type="application/x-ndjson")
+    raw_bytes = validate_image_base64(req.image_base64)
+    return StreamingResponse(event_stream(req, raw_bytes), media_type="application/x-ndjson")

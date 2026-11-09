@@ -19,6 +19,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -364,45 +365,50 @@ fun CameraScreen(
         previewContent = {
             if (hasCameraPermission) {
                 key(lens) {
+                    val previewView = remember {
+                        PreviewView(context).apply {
+                            scaleType = PreviewView.ScaleType.FIT_CENTER
+                            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                        }
+                    }
+                    DisposableEffect(previewView, lifecycleOwner) {
+                        val release = bindUseCases(
+                            context = context,
+                            lifecycleOwner = lifecycleOwner,
+                            previewView = previewView,
+                            analysisExecutor = analysisExecutor,
+                            lens = lens,
+                            flashMode = flash,
+                            onAnalyze = { imageProxy, actualLens ->
+                                viewModel.onFrame(
+                                    imageProxy = imageProxy,
+                                    lensFacing = if (actualLens == CameraLens.FRONT) "front" else "back",
+                                )
+                            },
+                            onImageCaptureReady = { capture -> imageCapture = capture },
+                            onCameraReady = { camera, actualLens ->
+                                activeCamera = camera
+                                if (camera != null) {
+                                    lens = actualLens
+                                    hasFlashUnit = camera.cameraInfo.hasFlashUnit()
+                                    if (!hasFlashUnit || actualLens == CameraLens.FRONT) {
+                                        flash = FlashMode.OFF
+                                        torchEnabled = false
+                                    }
+
+                                    val exposureState = camera.cameraInfo.exposureState
+                                    minExposureIndex = exposureState.exposureCompensationRange.lower
+                                    maxExposureIndex = exposureState.exposureCompensationRange.upper
+                                    exposureStepEv = exposureState.exposureCompensationStep.toFloat()
+                                    exposureIndex = exposureIndex.coerceIn(minExposureIndex, maxExposureIndex)
+                                }
+                            },
+                        )
+                        onDispose { release() }
+                    }
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            PreviewView(ctx).apply {
-                                // Use a fit-based preview so the live framing matches the saved photo more closely.
-                                scaleType = PreviewView.ScaleType.FIT_CENTER
-                                implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-                                bindUseCases(
-                                    context = ctx,
-                                    lifecycleOwner = lifecycleOwner,
-                                    previewView = this,
-                                    analysisExecutor = analysisExecutor,
-                                    lens = lens,
-                                    flashMode = flash,
-                                    onAnalyze = { imageProxy ->
-                                        viewModel.onFrame(
-                                            imageProxy = imageProxy,
-                                            lensFacing = if (lens == CameraLens.FRONT) "front" else "back",
-                                        )
-                                    },
-                                    onImageCaptureReady = { capture -> imageCapture = capture },
-                                    onCameraReady = { camera ->
-                                        activeCamera = camera
-
-                                        hasFlashUnit = camera.cameraInfo.hasFlashUnit()
-                                        if (!hasFlashUnit || lens == CameraLens.FRONT) {
-                                            flash = FlashMode.OFF
-                                            torchEnabled = false
-                                        }
-
-                                        val exposureState = camera.cameraInfo.exposureState
-                                        minExposureIndex = exposureState.exposureCompensationRange.lower
-                                        maxExposureIndex = exposureState.exposureCompensationRange.upper
-                                        exposureStepEv = exposureState.exposureCompensationStep.toFloat()
-                                        exposureIndex = exposureIndex.coerceIn(minExposureIndex, maxExposureIndex)
-                                    },
-                                )
-                            }
-                        },
+                        factory = { previewView },
                     )
                 }
                 CameraOverlay(state = uiState.overlay, rollDegrees = rollDegrees)
@@ -1254,86 +1260,117 @@ private fun bindUseCases(
     analysisExecutor: ExecutorService,
     lens: CameraLens,
     flashMode: FlashMode,
-    onAnalyze: (androidx.camera.core.ImageProxy) -> Unit,
-    onImageCaptureReady: (ImageCapture) -> Unit,
-    onCameraReady: (androidx.camera.core.Camera) -> Unit,
-) {
+    onAnalyze: (androidx.camera.core.ImageProxy, CameraLens) -> Unit,
+    onImageCaptureReady: (ImageCapture?) -> Unit,
+    onCameraReady: (androidx.camera.core.Camera?, CameraLens) -> Unit,
+): () -> Unit {
     val tag = "CamMate"
-    val analysisSize = Size(512, 288)
-    val providerFuture = ProcessCameraProvider.getInstance(context)
-    providerFuture.addListener(
-        {
-            val cameraProvider = providerFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.surfaceProvider = previewView.surfaceProvider
-            }
-            val imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setFlashMode(flashMode.imageCaptureMode)
-                .build()
-
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setResolutionSelector(
-                    ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(
-                                analysisSize,
-                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
-                            ),
-                        )
-                        .build(),
+    val preview = Preview.Builder().build().also {
+        it.surfaceProvider = previewView.surfaceProvider
+    }
+    val imageCapture = ImageCapture.Builder()
+        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+        .setFlashMode(flashMode.imageCaptureMode)
+        .build()
+    val imageAnalysis = ImageAnalysis.Builder()
+        .setResolutionSelector(
+            ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(512, 288),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                    ),
                 )
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also {
-                    it.setAnalyzer(analysisExecutor) { imageProxy ->
-                        onAnalyze(imageProxy)
-                    }
-                }
+                .build(),
+        )
+        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        .build()
+    var disposed = false
+    var cameraProvider: ProcessCameraProvider? = null
 
-            val selector = if (lens == CameraLens.FRONT) {
+    fun bind() {
+        val provider = cameraProvider ?: return
+        // PreviewView supplies the FIT viewport only after attachment and measurement.
+        val viewPort = previewView.viewPort ?: return
+        if (disposed || lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) return
+        onImageCaptureReady(null)
+        onCameraReady(null, lens)
+        preview.targetRotation = viewPort.rotation
+        imageCapture.targetRotation = viewPort.rotation
+        imageAnalysis.targetRotation = viewPort.rotation
+        val useCases = UseCaseGroup.Builder()
+            .setViewPort(viewPort)
+            .addUseCase(preview)
+            .addUseCase(imageCapture)
+            .addUseCase(imageAnalysis)
+            .build()
+
+        fun bindCamera(actualLens: CameraLens) {
+            provider.unbind(preview, imageCapture, imageAnalysis)
+            imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                try {
+                    onAnalyze(imageProxy, actualLens)
+                } catch (error: Exception) {
+                    Log.e(tag, "[camera.analyze] 帧处理失败", error)
+                } finally {
+                    imageProxy.close()
+                }
+            }
+            val selector = if (actualLens == CameraLens.FRONT) {
                 CameraSelector.DEFAULT_FRONT_CAMERA
             } else {
                 CameraSelector.DEFAULT_BACK_CAMERA
             }
+            val camera = provider.bindToLifecycle(lifecycleOwner, selector, useCases)
+            onImageCaptureReady(imageCapture)
+            onCameraReady(camera, actualLens)
+        }
 
-            try {
-                cameraProvider.unbindAll()
-                val camera = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    selector,
-                    preview,
-                    imageCapture,
-                    imageAnalysis,
-                )
-                onImageCaptureReady(imageCapture)
-                onCameraReady(camera)
-            } catch (e: Exception) {
-                Log.e(tag, "[camera.bind] 主摄像头绑定失败，尝试回退", e)
-                if (lens == CameraLens.FRONT) {
-                    try {
-                        cameraProvider.unbindAll()
-                        val fallbackCamera = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageCapture,
-                            imageAnalysis,
-                        )
-                        onImageCaptureReady(imageCapture)
-                        onCameraReady(fallbackCamera)
-                        Toast.makeText(context, "前置相机不可用，已切换后置", Toast.LENGTH_SHORT).show()
-                    } catch (fallbackError: Exception) {
-                        Log.e(tag, "[camera.bind] 前置回退后置失败", fallbackError)
-                        Toast.makeText(context, "相机初始化失败，请重试", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
+        try {
+            bindCamera(lens)
+        } catch (error: Exception) {
+            Log.e(tag, "[camera.bind] 主摄像头绑定失败，尝试回退", error)
+            if (lens == CameraLens.FRONT) {
+                try {
+                    bindCamera(CameraLens.BACK)
+                    Toast.makeText(context, "前置相机不可用，已切换后置", Toast.LENGTH_SHORT).show()
+                } catch (fallbackError: Exception) {
+                    Log.e(tag, "[camera.bind] 前置回退后置失败", fallbackError)
+                    Toast.makeText(context, "相机初始化失败，请重试", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "相机初始化失败，请重试", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val layoutListener = android.view.View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+        if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) bind()
+    }
+    previewView.addOnLayoutChangeListener(layoutListener)
+    val providerFuture = ProcessCameraProvider.getInstance(context)
+    providerFuture.addListener(
+        {
+            if (!disposed) {
+                try {
+                    cameraProvider = providerFuture.get()
+                    bind()
+                } catch (error: Exception) {
+                    Log.e(tag, "[camera.bind] 相机初始化失败", error)
                     Toast.makeText(context, "相机初始化失败，请重试", Toast.LENGTH_SHORT).show()
                 }
             }
         },
         ContextCompat.getMainExecutor(context),
     )
+    return {
+        disposed = true
+        previewView.removeOnLayoutChangeListener(layoutListener)
+        imageAnalysis.clearAnalyzer()
+        cameraProvider?.unbind(preview, imageCapture, imageAnalysis)
+        onImageCaptureReady(null)
+        onCameraReady(null, lens)
+    }
 }
 
 private fun capturePhoto(

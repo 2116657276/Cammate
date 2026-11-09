@@ -24,8 +24,8 @@ logger = logging.getLogger("uvicorn.error")
 
 class ExternalProvider(VisionProvider):
     """
-    External provider for Volcengine Ark vision models.
-    Falls back to MockProvider on any failure to keep MVP always available.
+    OpenAI-compatible external vision provider.
+    Strict cloud mode raises on failure; optional local fallback must be explicit.
     """
 
     def __init__(self) -> None:
@@ -49,7 +49,7 @@ class ExternalProvider(VisionProvider):
         self.reasoning_effort = self._env_choice(
             "ARK_REASONING_EFFORT",
             "minimal",
-            {"minimal", "low", "medium", "high"},
+            {"none", "minimal", "low", "medium", "high"},
         )
         # Default bypasses local HTTP(S) proxy to avoid unnecessary detours for domestic Ark endpoint.
         self.trust_env_proxy = self._env_bool("ARK_TRUST_ENV", False)

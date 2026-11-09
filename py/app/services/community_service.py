@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -11,7 +12,7 @@ import random
 import time
 import uuid
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Lock, Thread
 from typing import Any
 
 import cv2
@@ -22,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat
 from app.core.config import PROJECT_ROOT
 from app.core.config import SETTINGS
 from app.core.database import open_db
+from app.services.image_validation import decode_image_base64, open_validated_image
 from app.models.schemas import (
     CommunityCocreateComposeRequest,
     CommunityCocreateComposeResponse,
@@ -511,24 +513,19 @@ def delete_post(user_id: int, post_id: int) -> CommunityDeleteResponse:
             raise HTTPException(status_code=403, detail="post does not belong to current user")
 
         raw_image_path = str(row["image_path"] or "").strip()
-        job_rows = conn.execute(
-            "SELECT * FROM community_creative_jobs WHERE reference_post_id = ?",
-            (post_id,),
-        ).fetchall()
-        for job_row in job_rows:
-            job_id = int(job_row["id"])
-            _delete_local_creative_path(str(job_row["result_image_path"] or ""))
-            _delete_local_creative_path(str(job_row["compare_input_path"] or ""))
-            _delete_job_artifacts(job_id=job_id, row=job_row)
 
         conn.execute("DELETE FROM community_post_likes WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM community_post_comments WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM community_post_signals WHERE post_id = ?", (post_id,))
-        conn.execute("DELETE FROM community_post_reports WHERE post_id = ?", (post_id,))
-        conn.execute("DELETE FROM community_creative_jobs WHERE reference_post_id = ?", (post_id,))
         conn.execute("UPDATE community_posts SET relay_parent_post_id = NULL WHERE relay_parent_post_id = ?", (post_id,))
         conn.execute("UPDATE community_posts SET style_template_post_id = NULL WHERE style_template_post_id = ?", (post_id,))
-        conn.execute("DELETE FROM community_posts WHERE id = ?", (post_id,))
+        conn.execute(
+            """UPDATE community_posts
+               SET moderation_status = 'deleted', image_path = '', image_blob = NULL,
+                   image_mime_type = '', relay_parent_post_id = NULL, style_template_post_id = NULL
+               WHERE id = ?""",
+            (post_id,),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -724,9 +721,10 @@ async def cocreate_compose(user_id: int, req: CommunityCocreateComposeRequest) -
 
 
 def create_compose_job(user_id: int, req: CommunityComposeRequest) -> CommunityCreativeJobView:
+    person_bytes = _prepare_jpeg_bytes(req.person_image_base64, SETTINGS.community_upload_max_side)
     payload = {
         "reference_post_id": req.reference_post_id,
-        "person_image_base64": req.person_image_base64,
+        "person_image_base64": base64.b64encode(person_bytes).decode("ascii"),
         "strength": _effective_creative_strength(req.strength),
     }
     return _create_creative_job(
@@ -738,10 +736,12 @@ def create_compose_job(user_id: int, req: CommunityComposeRequest) -> CommunityC
 
 
 def create_cocreate_job(user_id: int, req: CommunityCocreateComposeRequest) -> CommunityCreativeJobView:
+    person_a = _prepare_jpeg_bytes(req.person_a_image_base64, SETTINGS.community_upload_max_side)
+    person_b = _prepare_jpeg_bytes(req.person_b_image_base64, SETTINGS.community_upload_max_side)
     payload = {
         "reference_post_id": req.reference_post_id,
-        "person_a_image_base64": req.person_a_image_base64,
-        "person_b_image_base64": req.person_b_image_base64,
+        "person_a_image_base64": base64.b64encode(person_a).decode("ascii"),
+        "person_b_image_base64": base64.b64encode(person_b).decode("ascii"),
         "strength": _effective_creative_strength(req.strength),
     }
     return _create_creative_job(
@@ -790,6 +790,9 @@ def retry_creative_job(user_id: int, job_id: int) -> CommunityCreativeJobView:
             raise HTTPException(status_code=409, detail="only failed jobs can be retried")
 
         now = int(time.time())
+        if now - _safe_int(row["finished_at"] or row["updated_at"]) >= _CREATIVE_RESULT_TTL_SEC or not json.loads(row["request_payload"] or "{}"):
+            raise HTTPException(status_code=409, detail="request_image_expired: 任务图片已过期，请重新选择图片并创建任务")
+        _ensure_post_exists(conn, reference_post_id)
         conn.execute(
             """
             UPDATE community_creative_jobs
@@ -872,6 +875,7 @@ def cancel_creative_job(user_id: int, job_id: int) -> CommunityCreativeJobView:
                 UPDATE community_creative_jobs
                 SET status = 'canceled',
                     progress = 100,
+                    request_payload = '{}',
                     cancel_requested = 1,
                     cancel_reason = ?,
                     next_retry_at = NULL,
@@ -959,11 +963,12 @@ def remake_guide(user_id: int, req: CommunityRemakeGuideRequest) -> CommunityRem
 
 
 def remake_analyze(user_id: int, req: CommunityRemakeAnalyzeRequest) -> CommunityRemakeAnalyzeResponse:
+    candidate_bytes = _prepare_jpeg_bytes(req.candidate_image_base64, SETTINGS.community_upload_max_side)
     template_post = get_post_or_404(req.template_post_id, current_user_id=user_id)
     reference_path, scene, _ = _load_reference_image_meta(req.template_post_id)
     analysis = _REMAKE_ANALYZER.analyze(
         template_bytes=reference_path.read_bytes(),
-        candidate_base64=req.candidate_image_base64,
+        candidate_base64=base64.b64encode(candidate_bytes).decode("ascii"),
         scene_hint=scene or template_post.scene_type,
     )
     _record_creative_job(
@@ -1076,6 +1081,9 @@ def moderate_report(admin_user_id: int | None, report_id: int, req: CommunityMod
         if row is None:
             raise HTTPException(status_code=404, detail="report not found")
         post_id = int(row["post_id"])
+        post = conn.execute("SELECT moderation_status FROM community_posts WHERE id = ?", (post_id,)).fetchone()
+        if action in {"restore", "hide"} and post is not None and post["moderation_status"] == "deleted":
+            raise HTTPException(status_code=409, detail="deleted posts cannot be restored")
         if action == "hide":
             conn.execute("UPDATE community_posts SET moderation_status = 'hidden' WHERE id = ?", (post_id,))
         elif action == "restore":
@@ -1170,39 +1178,43 @@ def _create_creative_job(
     return get_creative_job(user_id=user_id, job_id=job_id)
 
 
-def _enqueue_creative_job(job_id: int) -> None:
+def _enqueue_creative_job(job_id: int, delay_sec: float = 0) -> bool:
     safe_job_id = max(0, int(job_id))
-    if SETTINGS.creative_queue_backend == "redis":
-        score = _job_ready_score_for_job(safe_job_id)
-        try:
-            _REDIS_QUEUE.enqueue_ready(safe_job_id, score)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"creative redis queue unavailable: {exc}") from exc
-        return
-    _ensure_job_worker_started()
-    _JOB_QUEUE.put(safe_job_id)
-
-
-def _enqueue_creative_job_with_delay(job_id: int, delay_sec: float) -> None:
     safe_delay = max(0.0, float(delay_sec))
-    safe_job_id = max(0, int(job_id))
-    if SETTINGS.creative_queue_backend == "redis":
-        score = _job_ready_score_for_job(safe_job_id)
-        execute_at = int(time.time() + safe_delay)
+    try:
+        if SETTINGS.creative_queue_backend == "redis":
+            score = _job_ready_score_for_job(safe_job_id)
+            if safe_delay:
+                _REDIS_QUEUE.enqueue_delayed(safe_job_id, score, int(time.time() + safe_delay))
+            else:
+                _REDIS_QUEUE.enqueue_ready(safe_job_id, score)
+        elif safe_delay:
+            def delayed_enqueue() -> None:
+                time.sleep(safe_delay)
+                _enqueue_creative_job(safe_job_id)
+
+            Thread(target=delayed_enqueue, name=f"community-job-delay-{safe_job_id}", daemon=True).start()
+        else:
+            _ensure_job_worker_started()
+            _JOB_QUEUE.put(safe_job_id)
+        return True
+    except Exception:
+        now = int(time.time())
+        conn = open_db()
         try:
-            _REDIS_QUEUE.enqueue_delayed(safe_job_id, score, execute_at)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"creative redis queue unavailable: {exc}") from exc
-        return
-    if safe_delay <= 0.01:
-        _enqueue_creative_job(safe_job_id)
-        return
-
-    def _delayed_enqueue() -> None:
-        time.sleep(safe_delay)
-        _enqueue_creative_job(safe_job_id)
-
-    Thread(target=_delayed_enqueue, name=f"community-job-delay-{safe_job_id}", daemon=True).start()
+            conn.execute(
+                """UPDATE community_creative_jobs
+                   SET status = 'failed', progress = 100, next_retry_at = NULL,
+                       error_code = 'queue_unavailable', error_message = '任务队列暂不可用，请稍后重试',
+                       lease_expires_at = NULL, updated_at = ?, finished_at = ?
+                   WHERE id = ? AND status = 'queued'""",
+                (now, now, safe_job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.exception("community.creative.enqueue_failed job_id=%d", safe_job_id)
+        return False
 
 
 def _ensure_job_worker_started() -> None:
@@ -1456,38 +1468,27 @@ def _claim_specific_creative_job(job_id: int, worker_name: str) -> tuple[int, st
 
 
 def _run_async_with_heartbeat(job_id: int, coro: Any) -> Any:
-    outcome: dict[str, Any] = {}
-    error: dict[str, Exception] = {}
-    done = Event()
-
-    def _runner() -> None:
+    async def run() -> Any:
+        task = asyncio.create_task(coro)
+        deadline = asyncio.get_running_loop().time() + _CREATIVE_JOB_HARD_TIMEOUT_SEC
         try:
-            outcome["value"] = _run_async(coro)
-        except Exception as exc:  # noqa: BLE001
-            error["value"] = exc
+            while not task.done():
+                _raise_if_job_cancel_requested(job_id)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError("creative job timed out")
+                _touch_job_heartbeat(job_id)
+                await asyncio.wait({task}, timeout=min(_CREATIVE_HEARTBEAT_SEC, remaining))
+            _raise_if_job_cancel_requested(job_id)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("creative job timed out")
+            return task.result()
         finally:
-            done.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-    worker = Thread(target=_runner, name=f"community-job-runner-{job_id}", daemon=True)
-    worker.start()
-    start = time.time()
-
-    while True:
-        if done.is_set():
-            break
-
-        _raise_if_job_cancel_requested(job_id)
-        if (time.time() - start) > float(_CREATIVE_JOB_HARD_TIMEOUT_SEC):
-            raise TimeoutError("creative job timed out")
-
-        _touch_job_heartbeat(job_id)
-        time.sleep(_CREATIVE_HEARTBEAT_SEC)
-
-    worker.join(timeout=0.2)
-    _touch_job_heartbeat(job_id)
-    if "value" in error:
-        raise error["value"]
-    return outcome.get("value")
+    return asyncio.run(run())
 
 
 def _mark_job_success(
@@ -1503,15 +1504,23 @@ def _mark_job_success(
     now = int(time.time())
     safe_notes = [str(item).strip()[:280] for item in placeholder_notes if str(item).strip()]
     safe_status = implementation_status if implementation_status in {"ready", "placeholder"} else "ready"
-    result_object = _store_creative_image(job_id, "result", composed_image_base64)
-    compare_object = _store_creative_image(job_id, "compare", compare_input_base64)
-    conn = open_db()
+    result_object = compare_object = conn = None
+    persisted = False
+    artifact_id = uuid.uuid4().hex
     try:
+        result_object = _OBJECT_STORAGE.store_image(job_id, f"result_{artifact_id}", composed_image_base64)
+        if result_object is None:
+            raise RuntimeError("creative result storage failed: empty result")
+        compare_object = _OBJECT_STORAGE.store_image(job_id, f"compare_{artifact_id}", compare_input_base64)
+        if compare_input_base64 and compare_object is None:
+            raise RuntimeError("creative comparison storage failed")
+        conn = open_db()
         cur = conn.execute(
             """
             UPDATE community_creative_jobs
             SET status = 'success',
                 progress = 100,
+                request_payload = '{}',
                 implementation_status = ?,
                 result_meta = ?,
                 result_image_base64 = NULL,
@@ -1568,9 +1577,11 @@ def _mark_job_success(
             ),
         )
         conn.commit()
+        persisted = cur.rowcount > 0
+        if not persisted:
+            _raise_if_job_cancel_requested(job_id)
         if cur.rowcount > 0:
-            if SETTINGS.creative_queue_backend == "redis":
-                _REDIS_QUEUE.clear_lease(job_id)
+            _clear_job_lease(job_id)
             _record_job_event(
                 job_id=job_id,
                 event_type="success",
@@ -1584,7 +1595,12 @@ def _mark_job_success(
             )
         return cur.rowcount > 0
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        if not persisted:
+            for stored in (result_object, compare_object):
+                if stored is not None:
+                    _OBJECT_STORAGE.delete_object(stored.provider, stored.storage_key)
 
 
 def _mark_job_failed(job_id: int, error_message: str, error_code: str = "job_failed") -> bool:
@@ -1608,8 +1624,7 @@ def _mark_job_failed(job_id: int, error_message: str, error_code: str = "job_fai
         )
         conn.commit()
         if cur.rowcount > 0:
-            if SETTINGS.creative_queue_backend == "redis":
-                _REDIS_QUEUE.clear_lease(job_id)
+            _clear_job_lease(job_id)
             _record_job_event(
                 job_id=job_id,
                 event_type="failed",
@@ -1631,6 +1646,7 @@ def _finalize_running_job_canceled(job_id: int, reason: str = "cancelled by user
             UPDATE community_creative_jobs
             SET status = 'canceled',
                 progress = 100,
+                request_payload = '{}',
                 cancel_requested = 1,
                 cancel_reason = ?,
                 next_retry_at = NULL,
@@ -1646,8 +1662,7 @@ def _finalize_running_job_canceled(job_id: int, reason: str = "cancelled by user
         )
         conn.commit()
         if cur.rowcount > 0:
-            if SETTINGS.creative_queue_backend == "redis":
-                _REDIS_QUEUE.clear_lease(job_id)
+            _clear_job_lease(job_id)
             _record_job_event(
                 job_id=job_id,
                 event_type="canceled",
@@ -1712,8 +1727,6 @@ def _handle_job_failure(job_id: int, error_message: str, retryable: bool, error_
             )
             conn.commit()
             if cur.rowcount > 0:
-                if SETTINGS.creative_queue_backend == "redis":
-                    _REDIS_QUEUE.clear_lease(job_id)
                 _record_job_event(
                     job_id=job_id,
                     event_type="retry_scheduled",
@@ -1725,7 +1738,7 @@ def _handle_job_failure(job_id: int, error_message: str, retryable: bool, error_
                         "delay_sec": delay_sec,
                     },
                 )
-                _enqueue_creative_job_with_delay(job_id, delay_sec)
+                _enqueue_creative_job(job_id, delay_sec)
             return
     finally:
         conn.close()
@@ -1877,15 +1890,13 @@ def _recover_stale_running_jobs() -> None:
                 )
                 conn.commit()
                 if cur.rowcount > 0:
-                    if SETTINGS.creative_queue_backend == "redis":
-                        _REDIS_QUEUE.clear_lease(job_id)
                     _record_job_event(
                         job_id=job_id,
                         event_type="recovered",
                         message=f"worker {stale_reason.replace('_', ' ')}, auto retry scheduled",
                         payload={"error_code": stale_reason, "next_retry_at": next_retry_at},
                     )
-                    _enqueue_creative_job_with_delay(job_id, delay_sec)
+                    _enqueue_creative_job(job_id, delay_sec)
                 continue
 
             conn.execute(
@@ -1904,8 +1915,7 @@ def _recover_stale_running_jobs() -> None:
                 (f"worker {stale_reason.replace('_', ' ')}", stale_reason, now, now, now, job_id),
             )
             conn.commit()
-            if SETTINGS.creative_queue_backend == "redis":
-                _REDIS_QUEUE.clear_lease(job_id)
+            _clear_job_lease(job_id)
             _record_job_event(
                 job_id=job_id,
                 event_type="failed",
@@ -1952,11 +1962,12 @@ def _creative_job_dir(job_id: int) -> Path:
     return SETTINGS.community_creative_result_dir / f"job_{max(0, int(job_id)):06d}"
 
 
-def _store_creative_image(job_id: int, label: str, image_base64: str | None):
-    try:
-        return _OBJECT_STORAGE.store_image(job_id=job_id, label=label, image_base64=image_base64)
-    except Exception:
-        return None
+def _clear_job_lease(job_id: int) -> None:
+    if SETTINGS.creative_queue_backend == "redis":
+        try:
+            _REDIS_QUEUE.clear_lease(job_id)
+        except Exception:
+            logger.warning("community.creative.clear_lease_failed job_id=%d", job_id)
 
 
 def _delete_job_artifacts(job_id: int, row: Any | None = None) -> None:
@@ -2251,10 +2262,6 @@ def _row_to_creative_job_view(row: Any) -> CommunityCreativeJobView:
     )
 
 
-def _run_async(coro: Any) -> Any:
-    import asyncio
-
-    return asyncio.run(coro)
 
 
 async def _compose_core(req: CommunityComposeRequest, job_id: int | None = None) -> CommunityComposeResponse:
@@ -2575,10 +2582,12 @@ def _ensure_safe_text(text: str) -> None:
 
 def _ensure_post_exists(conn: Any, post_id: int) -> Any:
     row = conn.execute(
-        "SELECT id FROM community_posts WHERE id = ? AND moderation_status = 'published'",
+        "SELECT id, moderation_status FROM community_posts WHERE id = ?",
         (post_id,),
     ).fetchone()
-    if row is None:
+    if row is not None and row["moderation_status"] == "deleted":
+        raise HTTPException(status_code=404, detail="reference post deleted; select another reference image")
+    if row is None or row["moderation_status"] != "published":
         raise HTTPException(status_code=404, detail="community post not found")
     return row
 
@@ -2589,18 +2598,9 @@ def _ensure_post_exists(conn: Any, post_id: int) -> Any:
 
 
 def _prepare_jpeg_bytes(image_base64: str, max_side: int) -> bytes:
-    cleaned = image_base64.strip()
-    if cleaned.startswith("data:image") and "," in cleaned:
-        _, cleaned = cleaned.split(",", 1)
+    raw = decode_image_base64(image_base64)
     try:
-        raw = base64.b64decode(cleaned, validate=True)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="invalid image_base64") from exc
-    if not raw:
-        raise HTTPException(status_code=400, detail="empty image")
-
-    try:
-        with Image.open(io.BytesIO(raw)) as image:
+        with open_validated_image(raw) as image:
             display = ImageOps.exif_transpose(image).convert("RGB")
             if max(display.size) > max_side:
                 display.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
@@ -2671,16 +2671,18 @@ def _load_reference_image_meta(reference_post_id: int) -> tuple[Path, str, str]:
     try:
         row = conn.execute(
             """
-            SELECT id, scene_type, place_tag, image_path
+            SELECT id, scene_type, place_tag, image_path, moderation_status
             FROM community_posts
-            WHERE id = ? AND moderation_status = 'published'
+            WHERE id = ?
             """,
             (reference_post_id,),
         ).fetchone()
     finally:
         conn.close()
 
-    if row is None:
+    if row is not None and row["moderation_status"] == "deleted":
+        raise HTTPException(status_code=404, detail="reference post deleted; select another reference image")
+    if row is None or row["moderation_status"] != "published":
         raise HTTPException(status_code=404, detail="reference post not found")
 
     reference_path = _resolve_community_image_path(str(row["image_path"] or ""))
@@ -3575,24 +3577,21 @@ def recover_stuck_creative_jobs(limit: int = 240, dry_run: bool = False) -> dict
     if dry_run:
         return summary
 
-    before = creative_queue_snapshot()
     _recover_stale_running_jobs()
-    after = creative_queue_snapshot()
-    recovered_est = max(0, _safe_int(before.get("running", 0), 0) - _safe_int(after.get("running", 0), 0))
-    summary["recovered_running"] = min(summary["stale_running_found"], recovered_est)
+    conn = open_db()
+    try:
+        summary["recovered_running"] = sum(
+            conn.execute("SELECT status FROM community_creative_jobs WHERE id = ?", (row["id"],)).fetchone()["status"] != "running"
+            for row in stale_running_rows
+        )
+    finally:
+        conn.close()
 
     for job_id in due_queued_ids:
-        try:
-            _enqueue_creative_job(job_id)
+        if _enqueue_creative_job(job_id):
             summary["requeued_due"] += 1
-        except Exception:
+        else:
             summary["enqueue_failed"] += 1
-            _record_job_event(
-                job_id=job_id,
-                event_type="recover_enqueue_failed",
-                message="recover script failed to enqueue due queued job",
-                payload={"job_id": job_id},
-            )
     return summary
 
 
@@ -3601,116 +3600,77 @@ def cleanup_expired_creative_objects(
     batch: int = 120,
     dry_run: bool = False,
 ) -> dict[str, int]:
-    now = int(time.time())
     safe_ttl = max(3600, int(ttl_sec or _CREATIVE_RESULT_TTL_SEC))
-    safe_batch = max(1, min(int(batch), 2000))
-    cutoff = now - safe_ttl
+    cutoff = int(time.time()) - safe_ttl
     conn = open_db()
     try:
         rows = conn.execute(
-            """
-            SELECT
-                id,
-                finished_at,
-                result_storage_provider,
-                result_storage_key,
-                compare_storage_provider,
-                compare_storage_key,
-                result_image_path,
-                compare_input_path
-            FROM community_creative_jobs
-            WHERE status = 'success'
-              AND finished_at IS NOT NULL
-              AND finished_at <= ?
-              AND (
-                    (result_storage_key IS NOT NULL AND trim(result_storage_key) != '')
-                 OR (compare_storage_key IS NOT NULL AND trim(compare_storage_key) != '')
-                 OR (result_image_path IS NOT NULL AND trim(result_image_path) != '')
-                 OR (compare_input_path IS NOT NULL AND trim(compare_input_path) != '')
-              )
-            ORDER BY finished_at ASC, id ASC
-            LIMIT ?
-            """,
-            (cutoff, safe_batch),
+            """SELECT id FROM community_creative_jobs
+               WHERE status IN ('success', 'failed', 'canceled') AND (
+                   (request_payload != '{}' AND
+                       (status IN ('success', 'canceled') OR COALESCE(finished_at, updated_at) <= ?))
+                   OR (COALESCE(finished_at, updated_at) <= ? AND (
+                       result_storage_key != '' OR compare_storage_key != ''
+                       OR result_image_path != '' OR compare_input_path != ''
+                       OR result_image_base64 IS NOT NULL OR compare_input_base64 IS NOT NULL)))
+               ORDER BY COALESCE(finished_at, updated_at), id LIMIT ?""",
+            (cutoff, cutoff, max(1, min(int(batch), 2000))),
         ).fetchall()
-    finally:
-        conn.close()
-
-    summary = {
-        "scanned": len(rows),
-        "deleted": 0,
-        "failed": 0,
-        "skipped": 0,
-    }
-    if dry_run:
-        return summary
-
-    conn = open_db()
-    try:
-        for row in rows:
-            job_id = int(row["id"])
-            deleted_all = True
-            attempts = 0
-
-            result_provider = str(row["result_storage_provider"] or "").strip()
-            result_key = str(row["result_storage_key"] or "").strip()
-            if result_provider and result_key:
-                attempts += 1
-                deleted_all = _OBJECT_STORAGE.delete_object(result_provider, result_key) and deleted_all
-            compare_provider = str(row["compare_storage_provider"] or "").strip()
-            compare_key = str(row["compare_storage_key"] or "").strip()
-            if compare_provider and compare_key:
-                attempts += 1
-                deleted_all = _OBJECT_STORAGE.delete_object(compare_provider, compare_key) and deleted_all
-
-            result_path = str(row["result_image_path"] or "").strip()
-            if result_path:
-                attempts += 1
-                deleted_all = _delete_local_creative_path(result_path) and deleted_all
-            compare_path = str(row["compare_input_path"] or "").strip()
-            if compare_path:
-                attempts += 1
-                deleted_all = _delete_local_creative_path(compare_path) and deleted_all
-
-            if attempts <= 0:
+        summary = {"scanned": len(rows), "deleted": 0, "failed": 0, "skipped": 0}
+        if dry_run:
+            return summary
+        for candidate in rows:
+            # Hold the write lock so a manual retry cannot claim images being purged.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM community_creative_jobs WHERE id = ?", (candidate["id"],)).fetchone()
+            if row is None or row["status"] not in {"success", "failed", "canceled"}:
+                conn.commit()
                 summary["skipped"] += 1
                 continue
-
-            if deleted_all:
+            job_id = int(row["id"])
+            expired = _safe_int(row["finished_at"] or row["updated_at"]) <= cutoff
+            if row["status"] in {"success", "canceled"} or expired:
+                conn.execute("UPDATE community_creative_jobs SET request_payload = '{}' WHERE id = ?", (job_id,))
+            deleted_all = True
+            if expired:
+                for prefix in ("result", "compare"):
+                    provider = str(row[f"{prefix}_storage_provider"] or "")
+                    key = str(row[f"{prefix}_storage_key"] or "")
+                    if provider and key:
+                        deleted_all = _OBJECT_STORAGE.delete_object(provider, key) and deleted_all
+                for key in ("result_image_path", "compare_input_path"):
+                    if row[key]:
+                        deleted_all = _delete_local_creative_path(str(row[key])) and deleted_all
                 conn.execute(
-                    """
-                    UPDATE community_creative_jobs
-                    SET result_storage_provider = '',
-                        result_storage_key = '',
-                        compare_storage_provider = '',
-                        compare_storage_key = '',
-                        result_image_path = '',
-                        compare_input_path = '',
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, job_id),
+                    """UPDATE community_creative_jobs
+                       SET result_image_base64 = NULL, compare_input_base64 = NULL,
+                           status = CASE WHEN status = 'success' AND job_type IN ('compose', 'cocreate')
+                                         THEN 'failed' ELSE status END,
+                           error_code = CASE WHEN status = 'success' AND job_type IN ('compose', 'cocreate')
+                                             THEN 'result_expired' ELSE error_code END,
+                           error_message = CASE WHEN status = 'success' AND job_type IN ('compose', 'cocreate')
+                                                THEN '任务图片已过期，请重新选择图片并创建任务' ELSE error_message END
+                       WHERE id = ?""",
+                    (job_id,),
                 )
-                summary["deleted"] += 1
-                _record_job_event(
-                    job_id=job_id,
-                    event_type="cleanup_deleted",
-                    message="expired creative objects deleted",
-                    payload={"ttl_sec": safe_ttl, "cutoff": cutoff},
-                )
-            else:
-                summary["failed"] += 1
-                _record_job_event(
-                    job_id=job_id,
-                    event_type="cleanup_failed",
-                    message="failed to delete at least one expired object",
-                    payload={"ttl_sec": safe_ttl, "cutoff": cutoff},
-                )
-        conn.commit()
+                if deleted_all:
+                    conn.execute(
+                        """UPDATE community_creative_jobs SET result_storage_provider = '', result_storage_key = '',
+                           compare_storage_provider = '', compare_storage_key = '',
+                           result_image_path = '', compare_input_path = '' WHERE id = ?""",
+                        (job_id,),
+                    )
+            conn.commit()
+            summary["deleted" if deleted_all else "failed"] += 1
+            _record_job_event(
+                job_id=job_id,
+                event_type="cleanup_deleted" if deleted_all else "cleanup_failed",
+                message="terminal input purged; expired objects cleaned" if deleted_all else "expired object deletion failed",
+                payload={"ttl_sec": safe_ttl, "expired": expired},
+            )
+        return summary
     finally:
         conn.close()
-
-    return summary
 
 
 def _row_to_report_view(row: Any) -> CommunityReportView:

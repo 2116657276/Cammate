@@ -12,9 +12,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from fastapi import HTTPException
 from PIL import Image, ImageOps
 
 from app.core.config import load_runtime_env
+from app.services.image_validation import decode_image_base64, open_validated_image
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -61,9 +63,8 @@ class DoubaoImageEditProvider:
         scene_hint: str | None,
         custom_prompt: str | None = None,
         progress_callback: Callable[[int], None] | None = None,
+        image_bytes: bytes | None = None,
     ) -> RetouchResult:
-        if not self.api_key:
-            raise RuntimeError("ARK_IMAGE_API_KEY missing")
 
         start_ts = time.perf_counter()
         logger.info(
@@ -76,7 +77,9 @@ class DoubaoImageEditProvider:
             self.size,
             self.response_format,
         )
-        upload_base64, prep_meta = self._prepare_image_for_upload(image_base64)
+        upload_base64, prep_meta = self._prepare_image_for_upload(image_base64, image_bytes)
+        if not self.api_key:
+            raise RuntimeError("ARK_IMAGE_API_KEY missing")
         source_geometry = SourceImageGeometry(
             size=prep_meta["source_size"],
             orientation=prep_meta["source_orientation"],
@@ -200,15 +203,10 @@ class DoubaoImageEditProvider:
 
         raise RuntimeError(f"Doubao retouch failed: {last_error}")
 
-    def _prepare_image_for_upload(self, image_base64: str) -> tuple[str, dict[str, Any]]:
-        cleaned = self._normalize_base64_image(image_base64)
+    def _prepare_image_for_upload(self, image_base64: str, image_bytes: bytes | None = None) -> tuple[str, dict[str, Any]]:
+        raw = image_bytes if image_bytes is not None else decode_image_base64(image_base64)
         try:
-            raw = base64.b64decode(cleaned, validate=True)
-        except Exception as exc:
-            raise RuntimeError("invalid image_base64") from exc
-
-        try:
-            with Image.open(io.BytesIO(raw)) as image:
+            with open_validated_image(raw) as image:
                 display_image = ImageOps.exif_transpose(image)
                 rgb = display_image.convert("RGB")
                 source_size = rgb.size
@@ -227,6 +225,8 @@ class DoubaoImageEditProvider:
                         "source_orientation": source_orientation,
                     },
                 )
+        except HTTPException:
+            raise
         except Exception as exc:
             raise RuntimeError("invalid image bytes") from exc
 

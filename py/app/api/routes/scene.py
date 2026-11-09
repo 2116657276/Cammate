@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import require_user
 from app.models.schemas import AuthUser, SceneDetectRequest, SceneDetectResponse
-from app.services.analyze_service import validate_image_base64
+from app.services.image_validation import validate_image_base64
 from scene_detector import get_scene_detector
 
 router = APIRouter(prefix="/scene", tags=["scene"])

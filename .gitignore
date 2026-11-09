@@ -142,6 +142,8 @@ celerybeat.pid
 py/.env.local
 .envrc
 .venv
+/runs/
+/.idea/
 env/
 venv/
 ENV/

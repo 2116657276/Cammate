@@ -83,4 +83,5 @@ dependencies {
     implementation(libs.coil.compose)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation("junit:junit:4.13.2")
 }

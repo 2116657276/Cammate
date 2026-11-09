@@ -1,218 +1,97 @@
 # Cammate
 
-Cammate 是一个面向拍摄辅助与社区演示的 `Android + FastAPI` 项目。当前仓库重点是把“能完整演示”的主链路跑通：用户登录后，可以进入拍摄、社区、设置三个底部分栏，完成拍摄辅助、社区浏览、社区发帖、姿势参考、AI 融合与基础账号管理。
+Android Compose + FastAPI 摄影辅助原型，包含场景/人脸检测、构图建议、修图、反馈、社区与异步图片融合。
 
-当前仓库文档分工如下：
+本仓库维护代码、配置模板与精简运行入口。完整架构、期中验收、开发计划和状态维护在 [SRTP](https://github.com/2116657276/SRTP)；本地相邻目录为 `../SRTP/`，实际进度以其中的 `docs/06-current-state.md` 为准。
 
-- `README.md`：项目入口、目录结构、快速启动、演示约定、技术选型结论
-- `DEVELOPMENT.md`：开发进度、实现细节、运行手册、日志与排障、后续计划
+## 环境与目录
 
-## 1. 当前演示范围
+- 服务端：uv、Python 3.12；依赖为 [py/requirements.txt](py/requirements.txt)。
+- 客户端：JDK 21、Android SDK Platform 36；Android Studio 打开 `kotlin/`。
+- 本机 API 端口：`8010`；模拟器使用 `http://10.0.2.2:8010`，真机使用电脑局域网 IP。
+- 演示库：`py/demo_app_data.db`；模型位于 `py/models/`，供给、许可和 SHA256 随交付版本记录。
 
-当前演示版本已经收敛为三个底部分栏：
+## 服务端启动
 
-- 拍摄：辅助拍摄、姿势推荐、AI 融合
-- 社区：朋友圈动态流，右上角进入“发布动态”和“玩法入口”
-- 设置：账号信息与退出登录
-
-当前可演示的主链路：
-
-`注册 / 登录 -> 进入拍摄页 -> 场景识别与拍摄辅助 -> 拍照 -> 修图 / 评分 -> 可选发布到社区 -> 浏览朋友圈 -> 点赞 / 评论 / 姿势参考 / AI 融合 -> 退出登录`
-
-## 2. 主要能力
-
-### 客户端
-
-- Jetpack Compose 页面与状态管理
-- CameraX 拍摄与预览
-- 登录态持久化与服务端地址持久化
-- 场景识别与 AI 构图建议
-- 修图结果预览与保存
-- 社区动态流、点赞、评论、详情页操作
-- 社区独立发帖页与玩法入口页
-- 姿势推荐与 AI 融合独立页面
-- 编辑资料页与点赞收藏页
-- AI 融合 / 双人共创异步任务与结果预览
-- 网络图片鉴权加载
-- 客户端文件日志与精简 logcat 输出
-
-### 服务端
-
-- FastAPI 鉴权、拍摄分析、修图、反馈、社区接口
-- SQLite 数据层与自动迁移
-- 社区演示 seed 数据
-- 社区推荐、点赞、评论、举报、审核动作
-- AI 融合 / 双人共创异步任务（含子图融合、姿势迁移、人脸检测）
-- Redis 队列与健康指标（租约、重试、心跳）
-- 本地文件结果存储，兼容 MinIO / S3 抽象
-- 精简终端日志与完整文件日志
-
-## 3. 目录结构
-
-- `kotlin/`：Android 客户端代码
-- `py/`：FastAPI 服务端、脚本、模型、数据库、演示素材
-- `py/app/`：服务端业务代码
-- `py/scripts/`：启动、seed、恢复、联调、告警脚本
-- `py/demo_assets/community_seed/`：社区演示图片与 `manifest.json`
-- `py/demo_app_data.db`：默认演示数据库
-- `py/app_data.db`：本地实验数据库，不作为演示默认库
-- `Pictures/`：本地原始演示素材来源目录
-
-## 4. 默认运行约定
-
-当前项目统一口径如下：
-
-- 服务端端口固定使用 `8010`
-- Android 模拟器默认访问 `http://10.0.2.2:8010`
-- 真机默认访问 `http://<你的局域网 IP>:8010`
-- 演示数据库固定使用 `py/demo_app_data.db`
-- Redis 默认地址为 `redis://127.0.0.1:6379/0`
-- 对象存储默认可对接 `http://127.0.0.1:9000`
-
-补充说明：
-
-- `py/app_data.db` 里可能保留旧联调数据或旧占位图，不建议作为演示默认库
-- 客户端历史默认地址 `8000` 已迁移到 `8010`
-- 社区演示图片以 `py/demo_assets/community_seed/` 和 `py/demo_app_data.db` 为准
-
-## 5. 快速启动
-
-### 5.1 安装依赖
+以下命令从 Cammate 根目录执行。已有 `.venv` 可跳过创建；已有私有配置只补缺项，不覆盖。
 
 ```bash
-mamba run -n Cam python -m pip install -r py/requirements.txt
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -r py/requirements.txt
+cp -n py/.env.example py/.env.local
+chmod 600 py/.env.local
 ```
 
-### 5.2 启动 API
-
-推荐统一使用下面这条命令：
+编辑 `py/.env.local` 后启动 API：
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8010
-mamba run -n Cam python py/scripts/run_api_server.py
+.venv/bin/python py/scripts/run_api_server.py --no-restart
 ```
 
-这个脚本会默认：
-
-- 使用 `py/demo_app_data.db`
-- 监听 `8010`
-- 如果发现 `8010` 已被旧服务占用，会先终止旧进程，再自动重启新服务
-
-如果你只想检查服务是否正常：
+另开终端检查本地健康状态：
 
 ```bash
 curl http://127.0.0.1:8010/healthz
 ```
 
-### 5.3 重建演示数据
+## 云端配置
 
-如果你更新了 `Pictures/` 或 `manifest.json`，可以重建社区演示库：
+配置加载顺序是进程环境变量 → `py/.env.local` → `py/.env`。修改后重启 API，以及独立运行的 worker。真实 Key 只放本地私有配置，不写进 README、APK 或 Git。
+
+| 功能 | 配置 | 说明 |
+| --- | --- | --- |
+| 看图、构图建议 | `ARK_API_KEY`、`ARK_MODEL`、`ARK_CHAT_API_URL` | 沿用变量名，接口支持 OpenAI 兼容协议；当前使用 DeepSeek 官方 Flash |
+| 图片编辑 | `ARK_IMAGE_API_KEY`、`ARK_IMAGE_MODEL`、`ARK_IMAGE_API_URL` | 使用独立图片编辑服务，不能把 DeepSeek 看图 Key 转发给其他厂商 |
+| 融合、双人共创 | `COMMUNITY_IMAGE_*` | 可单独配置；未设置时沿用 `ARK_IMAGE_*` |
+
+DeepSeek 官方看图配置已写入 [py/.env.example](py/.env.example)，模型为 `deepseek-flash`，`ARK_REASONING_EFFORT=none` 关闭思考。该模型接入不代表图片编辑或融合已具备真实云端成功能力。接口格式见 [DeepSeek 官方视觉文档](https://api-docs.deepseek.com/guides/vision)。
+
+默认先离线核对配置，真实云端只做必要的单次连通与总用时记录，不自动批量付费压测。首字延迟、分位数和完整应用链路须分别记录，不能用一次官方请求代替全部验收。
+
+## Redis 与 worker
+
+融合/双人共创需要 Redis 和 worker。Redis 队列在开发模式下会启用内嵌 worker，仅设 `CREATIVE_EMBEDDED_WORKER=false` 不会关闭它；需要独立进程时同时设置 `APP_ENV=production`，再用以下命令分别启动 API 与 worker，避免重复启动。
 
 ```bash
-mamba run -n Cam python py/scripts/build_demo_seed.py
-mamba run -n Cam python py/scripts/run_api_server.py
+# 终端一，Cammate 根目录
+APP_ENV=production CREATIVE_EMBEDDED_WORKER=false \
+  .venv/bin/python py/scripts/run_api_server.py --no-restart
 ```
-
-### 5.4 启动创意任务 worker
-
-如果需要演示异步 AI 融合 / 双人共创任务，建议单独启动 worker：
 
 ```bash
-mamba run -n Cam python py/scripts/run_api_server.py
-PYTHONPATH=py APP_DB_PATH=py/demo_app_data.db mamba run -n Cam python py/scripts/run_creative_worker.py
+# 终端二，Cammate 根目录
+PYTHONPATH=py APP_DB_PATH=py/demo_app_data.db \
+  .venv/bin/python py/scripts/run_creative_worker.py
 ```
 
-如果只是最小演示，也可以先不启 worker，但对应异步任务能力会受限。
+未配置图片编辑服务时可能返回明确标注的本地融合预览；这不算真实云端生成验收通过。
 
-### 5.5 运行 Android 客户端
+## Android 构建与连接
 
-1. 用 Android Studio 打开 `kotlin/`
-2. 等待 Gradle Sync 完成
-3. 运行 `app`
-4. 在 `kotlin/local.properties` 里设置 `cammate.server.url`
-5. 如有需要，再在设置页确认或覆盖服务端地址
+在 `kotlin/local.properties` 配置服务端地址；真机需替换为电脑的局域网 IP。地址会编入 APK，修改后重新构建。
 
-常用地址：
+```properties
+cammate.server.url=http://10.0.2.2:8010
+```
 
-- 模拟器：`http://10.0.2.2:8010`
-- 真机：`http://<你的局域网 IP>:8010`
+```bash
+cd kotlin
+./gradlew :app:assembleDebug
+```
 
-本地切换建议：
+APK 输出为 `kotlin/app/build/outputs/apk/debug/app-debug.apk`。安装后依次验证登录、相机权限、拍照和分析，不以构建成功代替设备验收。
 
-- 模拟器联调：`cammate.server.url=http://10.0.2.2:8080`
-- 真机联调：`cammate.server.url=http://<你的局域网 IP>:8080`
-- `local.properties` 已被 `.gitignore` 忽略，适合保存你本机的默认服务端地址
+## 离线回归与证据
 
-## 6. 日志与排障入口
+以下服务端和 JVM 回归使用隔离数据库、模型/外部服务替身或本机测试 HTTP 服务，不调用真实云端付费模型。
 
-### 服务端日志
+```bash
+# Cammate 根目录
+PYTHONPATH=py .venv/bin/python -m unittest discover -s py/tests -p 'test_server_repairs.py' -v
+cd kotlin
+./gradlew :app:testDebugUnitTest
+```
 
-- 终端：只保留启动信息、警告、错误、慢请求等核心输出
-- 文件：完整日志写入 `py/logs/server.log`
+原始日志、截图、测试照片、凭据与运行数据库仅保留在本地忽略目录。`runs/` 中的证据不随代码提交；完整验收状态见 SRTP，不在本仓库另维护一套进度表。
 
-### 客户端日志
-
-- `logcat` 默认保留更关键的日志级别
-- 客户端文件日志写入应用私有目录下的 `client.log`
-
-### 常用排查顺序
-
-1. 先看 `curl http://127.0.0.1:8010/healthz`
-2. 再看 `py/logs/server.log`
-3. 再看 Android `adb logcat`
-4. 确认客户端连接地址是否仍然是旧端口或错误 IP
-5. 确认服务端当前连接的是不是 `py/demo_app_data.db`
-
-## 7. 当前技术选型结论
-
-### SQLite
-
-当前阶段继续使用 SQLite 是合理的：
-
-- 单机演示与本地联调足够稳定
-- 已启用 `WAL`、`busy_timeout` 等基础配置
-- 数据模型和脚本仍然围绕 SQLite 设计
-
-什么时候再考虑 MySQL：
-
-- 多实例部署
-- 更高并发写入
-- 需要更强的后台运营与分析支撑
-
-### Redis
-
-当前建议保留 Redis：
-
-- 创意任务已经做成异步队列
-- 有 worker、重试、租约、心跳、健康指标
-- 比进程内队列更适合后续扩展
-
-### MinIO
-
-当前建议保留抽象，但不强依赖：
-
-- 单机演示时，本地文件存储就足够
-- 多机部署、对象统一管理、结果持久化时，MinIO / S3 更合适
-
-当前最实际的组合是：
-
-`SQLite + Redis + 本地文件`
-
-如果后续更接近生产，再升级到：
-
-`SQLite / MySQL + Redis + MinIO / S3`
-
-## 8. 当前重点与已知边界
-
-当前已经比较适合演示，但仍然是”演示优先”的工程状态。最近更新（2026-06）：
-
-- **UI 全面升级**：新增编辑资料页、点赞收藏页、发布入口面板；主题色系与字体排版优化
-- **AI 融合模块完善**：子图融合、姿势迁移、人脸检测链路增强；异步任务队列添加重试、租约、心跳机制
-- 社区内容和推荐基于演示数据与规则，不是完整生产策略
-- AI 融合 / 双人共创支持异步任务，部分极端场景仍有 fallback 逻辑
-- 发布动态目前以”单图发布 + 可选地点 / 场景 / 文案”为主
-- 设置页已经刻意简化，只保留账号相关功能
-
-## 9. 进一步阅读
-
-更详细的开发进度、运行细节、环境变量、恢复脚本和阶段计划见 `DEVELOPMENT.md`。
+本轮修复覆盖删帖数据归属、原图 TTL、图片输入边界、NDJSON 错误事件、会话/照片请求隔离、任务入队和查询恢复、协程取消、相机坐标。真机、真实图片编辑/融合、全量功能、稳定性及独立复现仍按 SRTP 验收协议执行；不据此宣称性能提速或模型准确率提升。

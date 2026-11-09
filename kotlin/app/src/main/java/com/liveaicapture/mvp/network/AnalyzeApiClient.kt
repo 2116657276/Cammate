@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -124,6 +125,7 @@ class AnalyzeApiClient(
                 val source = body.source()
                 while (true) {
                     val line = source.readUtf8Line() ?: break
+                    coroutineContext.ensureActive()
                     val trimmed = line.trim()
                     if (trimmed.isEmpty()) {
                         continue
@@ -240,6 +242,10 @@ class AnalyzeApiClient(
             "ui" -> AnalyzeEvent.Ui(
                 text = obj["text"]?.jsonPrimitive?.content ?: "请调整构图",
                 level = obj["level"]?.jsonPrimitive?.content ?: "info",
+            )
+
+            "error" -> AnalyzeEvent.Error(
+                text = obj["text"]?.jsonPrimitive?.content ?: "云端分析失败，请重试",
             )
 
             "param" -> AnalyzeEvent.Param(
